@@ -669,7 +669,11 @@ fn build_tray(
         .separator()
         .text(TRAY_QUIT_ID, "退出")
         .build()?;
-    TrayIconBuilder::new()
+    // 显式设置托盘图标：不依赖 default_window_icon（Windows 上可能为 None 导致托盘空白）
+    let tray_icon = tauri::image::Image::from_bytes(include_bytes!("../icons/32x32.png"))
+        .map_err(|err| tauri::Error::Anyhow(err.into()))?;
+    TrayIconBuilder::with_id("main")
+        .icon(tray_icon)
         .menu(&menu)
         .show_menu_on_left_click(true)
         .on_menu_event(move |app, event| match event.id().as_ref() {
