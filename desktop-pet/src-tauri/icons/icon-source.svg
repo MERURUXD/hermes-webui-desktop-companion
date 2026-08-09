@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- 背景：品牌绿圆角方形（Tauri 图标底） -->
+  <rect x="0" y="0" width="1024" height="1024" rx="180" fill="#08b153"/>
+
+  <g transform="translate(0, 45)">
+    <!-- 后发：两侧鬓发 + 外翘发尾（黑） -->
+    <path d="M 300 320 C 210 330 165 420 160 550 C 156 650 140 700 96 748 C 96 748 120 795 196 800 C 252 803 288 772 300 716 C 308 660 308 560 312 480 C 316 420 316 360 300 320 Z" fill="#141414"/>
+    <path d="M 724 320 C 814 330 859 420 864 550 C 868 650 884 700 928 748 C 928 748 904 795 828 800 C 772 803 736 772 724 716 C 716 660 716 560 712 480 C 708 420 708 360 724 320 Z" fill="#141414"/>
+
+    <!-- 脸：圆润短圆脸（白） -->
+    <ellipse cx="512" cy="500" rx="244" ry="250" fill="#ffffff"/>
+
+    <!-- 头顶帽状发 + 扇贝状齐刘海（黑） -->
+    <path d="M 240 352 C 240 300 258 210 330 165 C 400 120 624 120 694 165 C 766 210 784 300 784 352 C 748 386 714 392 680 384 C 646 376 620 400 588 404 C 556 408 468 408 436 404 C 402 400 376 376 342 384 C 310 392 276 386 240 352 Z" fill="#141414"/>
+
+    <!-- 白色发箍：横跨头顶的弧线 -->
+    <path d="M 330 250 C 430 186 594 186 694 250" stroke="#ffffff" stroke-width="26" fill="none" stroke-linecap="round"/>
+
+    <!-- 发箍旁小蝴蝶结发夹（观者右侧，白底黑边） -->
+    <g transform="translate(692, 240)">
+      <ellipse cx="-26" cy="0" rx="26" ry="19" fill="#ffffff" stroke="#141414" stroke-width="7" transform="rotate(-22 -26 0)"/>
+      <ellipse cx="26" cy="0" rx="26" ry="19" fill="#ffffff" stroke="#141414" stroke-width="7" transform="rotate(22 26 0)"/>
+      <circle cx="0" cy="0" r="15" fill="#ffffff" stroke="#141414" stroke-width="7"/>
+    </g>
+
+    <!-- 大眼睛：深色竖椭圆 + 白色高光（上内侧主高光 + 下侧次高光） -->
+    <ellipse cx="400" cy="545" rx="60" ry="86" fill="#141414"/>
+    <ellipse cx="624" cy="545" rx="60" ry="86" fill="#141414"/>
+    <circle cx="380" cy="512" r="19" fill="#ffffff"/>
+    <circle cx="644" cy="512" r="19" fill="#ffffff"/>
+    <circle cx="414" cy="592" r="8" fill="#ffffff"/>
+    <circle cx="610" cy="592" r="8" fill="#ffffff"/>
+
+    <!-- 两颊腮红短线（浅粉） -->
+    <line x1="324" y1="596" x2="350" y2="626" stroke="#ff8fa8" stroke-width="15" stroke-linecap="round"/>
+    <line x1="674" y1="596" x2="700" y2="626" stroke="#ff8fa8" stroke-width="15" stroke-linecap="round"/>
+
+    <!-- 嘴：极小抿嘴微笑 -->
+    <path d="M 490 650 Q 512 668 534 650" stroke="#141414" stroke-width="14" fill="none" stroke-linecap="round"/>
+  </g>
+</svg>
