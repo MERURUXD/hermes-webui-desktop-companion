@@ -547,14 +547,26 @@
       });
     }catch(err){console.warn('Failed to listen for pet permission menu',err);}
   }
-  function _onUnifiedBadgeClick(event){
-    if(!_eventInsideBadge(event)) return;
+  let _badgePointerToggleAt=0;
+  function _consumeUnifiedBadgeEvent(event){
+    if(!_eventInsideBadge(event)) return false;
     event.preventDefault();
     event.stopPropagation();
     if(typeof event.stopImmediatePropagation==='function') event.stopImmediatePropagation();
+    return true;
+  }
+  function _onUnifiedBadgePointerDown(event){
+    if(!_consumeUnifiedBadgeEvent(event)) return;
+    _badgePointerToggleAt=Date.now();
+    _onBadgeActivate();
+  }
+  function _onUnifiedBadgeClick(event){
+    if(!_consumeUnifiedBadgeEvent(event)) return;
+    if(Date.now()-_badgePointerToggleAt<700) return;
     _onBadgeActivate();
   }
   document.addEventListener('contextmenu',_openPetContextMenu);
+  document.addEventListener('pointerdown',_onUnifiedBadgePointerDown,{capture:true});
   document.addEventListener('click',_onUnifiedBadgeClick,{capture:true});
   stage.addEventListener('mousedown',_startTauriWindowDrag,{capture:true});
   stage.addEventListener('pointerdown',_startTauriWindowDrag,{capture:true});
