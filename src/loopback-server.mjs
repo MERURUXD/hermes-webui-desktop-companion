@@ -4,7 +4,7 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 export const SERVICE_NAME = 'hermes-webui-desktop-companion';
 export const DISPLAY_NAME = 'Hermes WebUI Desktop Companion';
@@ -1888,6 +1888,7 @@ export function startServer(options = {}) {
   return server;
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+const entryUrl = process.argv[1] ? pathToFileURL(process.argv[1]).href : '';
+if (import.meta.url === entryUrl) {
   startServer();
 }

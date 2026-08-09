@@ -198,6 +198,13 @@ or press `Ctrl-C` in the terminal running `npm run start:pet`.
 If Hermes WebUI shows Desktop Companion as installed but the pet does not react,
 check that `npm run start:pet` is still running and then reload Hermes WebUI.
 
+### Windows desktop start
+
+For the minimal Windows desktop flow, launch the built Desktop Pet `.exe` by
+double-clicking it. The app keeps its tray icon available while running; launching
+the same `.exe` again exits the second process. Existing Windows helper scripts
+remain available as legacy development workflows; no installer is included.
+
 ### Manual extension mode
 
 For older WebUI builds or local extension-asset development, print the Hermes

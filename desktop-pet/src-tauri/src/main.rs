@@ -1,11 +1,26 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use serde::{Deserialize, Serialize};
 use std::process;
-use std::process::Command;
+use std::io::{Read, Write};
+use std::net::TcpStream;
+use std::path::PathBuf;
+use std::process::{Child, Command};
 use std::sync::{atomic::AtomicBool, atomic::Ordering, Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 use tauri::menu::{MenuBuilder, SubmenuBuilder};
+use tauri::tray::TrayIconBuilder;
 use tauri::{Emitter, Listener, Manager, Url, WebviewWindow};
+
+#[cfg(target_os = "windows")]
+use windows::Win32::Foundation::{CloseHandle, GetLastError, HANDLE, ERROR_ALREADY_EXISTS, HWND, RECT};
+#[cfg(target_os = "windows")]
+use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST};
+#[cfg(target_os = "windows")]
+use windows::Win32::System::Threading::CreateMutexW;
+#[cfg(target_os = "windows")]
+use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowRect, GetWindowThreadProcessId};
 
 const CLOSE_PET_MENU_ID: &str = "close_pet";
 const MANAGE_PETS_MENU_ID: &str = "manage_pets";
@@ -18,6 +33,185 @@ const PET_RAISE_REQUESTED_EVENT: &str = "pet-raise-requested";
 const PET_PERMISSION_TOGGLE_EVENT: &str = "pet-permission-toggle";
 const SKIN_MENU_PREFIX: &str = "skin:";
 const PERMISSION_MENU_PREFIX: &str = "permission:";
+
+const LOOPBACK_ADDR: &str = "127.0.0.1:17787";
+
+#[cfg(target_os = "windows")]
+struct SingleInstanceMutex(HANDLE);
+
+#[cfg(target_os = "windows")]
+impl Drop for SingleInstanceMutex {
+    fn drop(&mut self) {
+        let _ = unsafe { CloseHandle(self.0) };
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn acquire_single_instance() -> Option<SingleInstanceMutex> {
+    let name: Vec<u16> = "Local\\HermesWebUIDesktopCompanion"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let mutex = unsafe { CreateMutexW(None, false, windows::core::PCWSTR(name.as_ptr())) }
+        .expect("failed to create desktop companion mutex");
+    if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+        let _ = unsafe { CloseHandle(mutex) };
+        return None;
+    }
+    Some(SingleInstanceMutex(mutex))
+}
+
+struct Sidecar {
+    child: Mutex<Option<Child>>,
+    /// Held open for the process lifetime; closing it kills the sidecar.
+    #[cfg(target_os = "windows")]
+    #[allow(dead_code)]
+    job: Mutex<Option<JobHandle>>,
+}
+
+/// Raw handle wrapper so Sidecar state stays Send + Sync for tauri::manage.
+#[cfg(target_os = "windows")]
+struct JobHandle(HANDLE);
+
+#[cfg(target_os = "windows")]
+unsafe impl Send for JobHandle {}
+
+#[cfg(target_os = "windows")]
+unsafe impl Sync for JobHandle {}
+
+#[cfg(target_os = "windows")]
+impl Drop for JobHandle {
+    fn drop(&mut self) {
+        let _ = unsafe { CloseHandle(self.0) };
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn assign_kill_on_close_job(child: &Child) -> Option<JobHandle> {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, SetInformationJobObject,
+        JobObjectExtendedLimitInformation, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+    unsafe {
+        let Ok(job) = CreateJobObjectW(None, None) else {
+            return None;
+        };
+        let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let size = std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32;
+        if SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            &info as *const _ as *const _,
+            size,
+        )
+        .is_err()
+        {
+            let _ = CloseHandle(job);
+            return None;
+        }
+        if AssignProcessToJobObject(job, HANDLE(child.as_raw_handle())).is_err() {
+            let _ = CloseHandle(job);
+            return None;
+        }
+        Some(JobHandle(job))
+    }
+}
+
+impl Sidecar {
+    fn start() -> Result<Self, Box<dyn std::error::Error>> {
+        if Self::healthy() {
+            return Ok(Self {
+                child: Mutex::new(None),
+                #[cfg(target_os = "windows")]
+                job: Mutex::new(None),
+            });
+        }
+
+        let root = std::env::var_os("HERMES_WORKSPACE_ROOT")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("..")
+                    .join("..")
+            });
+        let mut command = Command::new("node");
+        command.args(["src/loopback-server.mjs"]).current_dir(root);
+        let allowed_origins = std::env::var("HERMES_COMPANION_ALLOWED_ORIGINS")
+            .unwrap_or_else(|_| "https://hermes.meruru.ccwu.cc".into());
+        command.env("HERMES_COMPANION_ALLOWED_ORIGINS", allowed_origins);
+        if let Ok(webui_base) = std::env::var("HERMES_DESKTOP_PET_WEBUI_BASE") {
+            command.env("HERMES_DESKTOP_PET_WEBUI_BASE", webui_base);
+        }
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(0x08000000);
+        }
+
+        let child = command.spawn()?;
+        #[cfg(target_os = "windows")]
+        let job = assign_kill_on_close_job(&child);
+        let sidecar = Self {
+            child: Mutex::new(Some(child)),
+            #[cfg(target_os = "windows")]
+            job: Mutex::new(job),
+        };
+        if !sidecar.wait_until_healthy() {
+            sidecar.stop();
+            return Err("loopback sidecar did not become healthy within 5 seconds".into());
+        }
+        Ok(sidecar)
+    }
+
+    fn healthy() -> bool {
+        let Ok(mut stream) = TcpStream::connect_timeout(
+            &LOOPBACK_ADDR.parse().expect("valid loopback address"),
+            Duration::from_millis(150),
+        ) else {
+            return false;
+        };
+        let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
+        let _ = stream.set_write_timeout(Some(Duration::from_millis(250)));
+        if stream
+            .write_all(b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+            .is_err()
+        {
+            return false;
+        }
+        let mut response = String::new();
+        stream.read_to_string(&mut response).is_ok()
+            && response.starts_with("HTTP/1.1 200")
+    }
+
+    fn wait_until_healthy(&self) -> bool {
+        (0..50).any(|_| {
+            if Self::healthy() {
+                true
+            } else {
+                thread::sleep(Duration::from_millis(100));
+                false
+            }
+        })
+    }
+
+    fn stop(&self) {
+        if let Ok(mut child) = self.child.lock() {
+            if let Some(mut child) = child.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+}
+
+impl Drop for Sidecar {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
 
 fn _persist_desktop_pet_preference(app: &tauri::AppHandle, enabled: bool) {
     let enabled_text = if enabled { "true" } else { "false" };
@@ -315,12 +509,20 @@ fn open_external_url(url: &str) {
     }
     #[cfg(target_os = "windows")]
     {
-        let _ = Command::new("cmd").args(["/c", "start", "", url]).spawn();
+        let _ = Command::new("explorer").arg(url).spawn();
     }
     #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
     {
         let _ = Command::new("xdg-open").arg(url).spawn();
     }
+}
+
+fn remote_webui_url() -> String {
+    std::env::var("HERMES_DESKTOP_PET_WEBUI_BASE")
+        .ok()
+        .map(|raw| raw.trim().trim_end_matches('/').to_string())
+        .filter(|trimmed| !trimmed.is_empty())
+        .unwrap_or_else(|| "https://hermes.meruru.ccwu.cc".into())
 }
 
 fn open_pet_gallery_manager(_app: &tauri::AppHandle) {
@@ -377,6 +579,145 @@ fn pet_context_menu_payload(payload: &str) -> PetContextMenuPayload {
     })
 }
 
+const TRAY_TOGGLE_ID: &str = "tray_toggle_pet";
+const TRAY_OPEN_WEBUI_ID: &str = "tray_open_webui";
+const TRAY_QUIT_ID: &str = "tray_quit";
+
+fn build_tray(app: &tauri::AppHandle) -> Result<(), tauri::Error> {
+    let menu = MenuBuilder::new(app)
+        .text(TRAY_TOGGLE_ID, "显示/隐藏宠物")
+        .text(TRAY_OPEN_WEBUI_ID, "打开 WebUI")
+        .separator()
+        .text(TRAY_QUIT_ID, "退出")
+        .build()?;
+    TrayIconBuilder::new()
+        .menu(&menu)
+        .show_menu_on_left_click(true)
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            TRAY_TOGGLE_ID => {
+                let handle = app.clone();
+                let window_handle = handle.clone();
+                let _ = handle.run_on_main_thread(move || {
+                    if let Some(window) = window_handle.get_webview_window("pet") {
+                        if window.is_visible().unwrap_or(false) {
+                            let _ = window.hide();
+                        } else {
+                            let _ = window.show();
+                        }
+                    }
+                });
+            }
+            TRAY_OPEN_WEBUI_ID => open_external_url(&remote_webui_url()),
+            TRAY_QUIT_ID => app.exit(0),
+            _ => {}
+        })
+        .build(app)?;
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn window_is_ours(hwnd: HWND) -> bool {
+    let mut pid = 0u32;
+    unsafe {
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+    }
+    pid == std::process::id()
+}
+
+#[cfg(target_os = "windows")]
+fn is_fullscreen_foreground() -> bool {
+    let hwnd = unsafe { GetForegroundWindow() };
+    if hwnd.is_invalid() || window_is_ours(hwnd) {
+        return false;
+    }
+
+    let mut window_rect = RECT::default();
+    if unsafe { GetWindowRect(hwnd, &mut window_rect) }.is_err() {
+        return false;
+    }
+    let monitor = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
+    if monitor.is_invalid() {
+        return false;
+    }
+    let mut monitor_info = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    if unsafe { GetMonitorInfoW(monitor, &mut monitor_info) }.as_bool() == false {
+        return false;
+    }
+
+    let width = (window_rect.right - window_rect.left).max(0) as i64;
+    let height = (window_rect.bottom - window_rect.top).max(0) as i64;
+    let monitor_width = (monitor_info.rcMonitor.right - monitor_info.rcMonitor.left).max(1) as i64;
+    let monitor_height = (monitor_info.rcMonitor.bottom - monitor_info.rcMonitor.top).max(1) as i64;
+    let covers_monitor = window_rect.left <= monitor_info.rcMonitor.left
+        && window_rect.top <= monitor_info.rcMonitor.top
+        && window_rect.right >= monitor_info.rcMonitor.right
+        && window_rect.bottom >= monitor_info.rcMonitor.bottom;
+    covers_monitor && width * height >= monitor_width * monitor_height * 95 / 100
+}
+
+#[cfg(target_os = "windows")]
+fn start_fullscreen_monitor(app: tauri::AppHandle) {
+    let saved_visibility = Arc::new(Mutex::new((false, false)));
+    thread::spawn(move || {
+        let mut fullscreen = false;
+        loop {
+            let next = is_fullscreen_foreground();
+            if next != fullscreen {
+                fullscreen = next;
+                let handle = app.clone();
+                let visibility = saved_visibility.clone();
+                if fullscreen {
+                    let window_handle = handle.clone();
+                    let _ = handle.run_on_main_thread(move || {
+                        let pet_visible = window_handle
+                            .get_webview_window("pet")
+                            .and_then(|window| window.is_visible().ok())
+                            .unwrap_or(false);
+                        let bubbles_visible = window_handle
+                            .get_webview_window("pet_bubbles")
+                            .and_then(|window| window.is_visible().ok())
+                            .unwrap_or(false);
+                        if let Ok(mut saved) = visibility.lock() {
+                            *saved = (pet_visible, bubbles_visible);
+                        }
+                        for label in ["pet", "pet_bubbles"] {
+                            if let Some(window) = window_handle.get_webview_window(label) {
+                                let _ = window.hide();
+                            }
+                        }
+                    });
+                } else {
+                    let (pet_visible, bubbles_visible) = visibility
+                        .lock()
+                        .map(|saved| *saved)
+                        .unwrap_or((false, false));
+                    let window_handle = handle.clone();
+                    let _ = handle.run_on_main_thread(move || {
+                        if let Some(window) = window_handle.get_webview_window("pet") {
+                            if pet_visible {
+                                let _ = window.show();
+                            } else {
+                                let _ = window.hide();
+                            }
+                        }
+                        if let Some(window) = window_handle.get_webview_window("pet_bubbles") {
+                            if bubbles_visible {
+                                let _ = window.show();
+                            } else {
+                                let _ = window.hide();
+                            }
+                        }
+                    });
+                }
+            }
+            thread::sleep(Duration::from_secs(1));
+        }
+    });
+}
+
 fn menu_label(value: Option<&String>, fallback: &str) -> String {
     let label = value
         .map(|raw| raw.trim())
@@ -425,6 +766,11 @@ fn sanitize_skin(skin: PetSkin) -> Option<PetSkin> {
 }
 
 fn main() {
+    #[cfg(target_os = "windows")]
+    let Some(_instance_mutex) = acquire_single_instance() else {
+        return;
+    };
+
     let restart_requested = Arc::new(AtomicBool::new(false));
     let restart_requested_for_setup = restart_requested.clone();
     let restart_requested_for_menu = restart_requested.clone();
@@ -432,6 +778,11 @@ fn main() {
     let bubble_visible_state_for_setup = bubble_visible_state.clone();
     tauri::Builder::default()
         .setup(move |app| {
+            let sidecar = Sidecar::start().map_err(|error| error.to_string())?;
+            app.manage(sidecar);
+            build_tray(app.handle())?;
+            #[cfg(target_os = "windows")]
+            start_fullscreen_monitor(app.handle().clone());
             navigate_window_to_webui(app, "pet", "/pet");
             navigate_window_to_webui(app, "pet_bubbles", "/pet/bubbles");
             if let Some(pet_window) = app.get_webview_window("pet") {
