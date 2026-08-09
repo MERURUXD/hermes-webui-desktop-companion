@@ -33,6 +33,8 @@ const PET_RAISE_REQUESTED_EVENT: &str = "pet-raise-requested";
 const PET_PERMISSION_TOGGLE_EVENT: &str = "pet-permission-toggle";
 const SKIN_MENU_PREFIX: &str = "skin:";
 const PERMISSION_MENU_PREFIX: &str = "permission:";
+const BUBBLE_STYLE_PREFIX: &str = "bubblestyle:";
+const PET_BUBBLE_STYLE_CHANGE_EVENT: &str = "pet-bubble-style-change";
 
 const LOOPBACK_ADDR: &str = "127.0.0.1:17787";
 
@@ -434,6 +436,7 @@ fn parse_attention_visibility(payload: &str) -> bool {
 struct PetContextMenuPayload {
     skins: Vec<PetSkin>,
     active_skin_id: Option<String>,
+    active_bubble_style: Option<String>,
     permissions: Option<PetPermissionsPayload>,
     menu_labels: Option<PetContextMenuLabels>,
 }
@@ -574,6 +577,7 @@ fn pet_context_menu_payload(payload: &str) -> PetContextMenuPayload {
     serde_json::from_str(payload).unwrap_or_else(|_| PetContextMenuPayload {
         skins: fallback_skins(),
         active_skin_id: Some("keeper".into()),
+        active_bubble_style: None,
         permissions: None,
         menu_labels: None,
     })
@@ -920,6 +924,39 @@ fn main() {
                     let Ok(skin_menu) = skin_builder.build() else {
                         return;
                     };
+                    let active_bubble_style = payload
+                        .active_bubble_style
+                        .as_deref()
+                        .filter(|style| matches!(*style, "default" | "chatgpt" | "chatgpt-dark" | "glasscn"))
+                        .unwrap_or("default");
+                    let bubble_style_label = |name: &str, label: &str| {
+                        if name == active_bubble_style {
+                            format!("{label} ✓")
+                        } else {
+                            label.to_string()
+                        }
+                    };
+                    let Ok(style_menu) = SubmenuBuilder::new(&menu_handle, "气泡样式")
+                        .text(
+                            format!("{BUBBLE_STYLE_PREFIX}default"),
+                            bubble_style_label("default", "经典"),
+                        )
+                        .text(
+                            format!("{BUBBLE_STYLE_PREFIX}chatgpt"),
+                            bubble_style_label("chatgpt", "半透明（ChatGPT 风）"),
+                        )
+                        .text(
+                            format!("{BUBBLE_STYLE_PREFIX}chatgpt-dark"),
+                            bubble_style_label("chatgpt-dark", "GPT 暗色"),
+                        )
+                        .text(
+                            format!("{BUBBLE_STYLE_PREFIX}glasscn"),
+                            bubble_style_label("glasscn", "液态玻璃（glasscn）"),
+                        )
+                        .build()
+                    else {
+                        return;
+                    };
                     let allow_direct_send = payload
                         .permissions
                         .as_ref()
@@ -962,6 +999,7 @@ fn main() {
                     };
                     let Ok(menu) = MenuBuilder::new(&menu_handle)
                         .item(&skin_menu)
+                        .item(&style_menu)
                         .text(MANAGE_PETS_MENU_ID, manage_pets_label)
                         .separator()
                         .item(&permission_menu)
@@ -988,6 +1026,14 @@ fn main() {
                 let _ = app.emit_to("pet", PET_SKIN_CHANGE_EVENT, skin_id.clone());
                 let _ = app.emit_to("pet_bubbles", PET_SKIN_CHANGE_EVENT, skin_id);
                 restore_pet_window_layers(&app.clone());
+                return;
+            }
+            if let Some(style) = id.strip_prefix(BUBBLE_STYLE_PREFIX) {
+                if matches!(style, "default" | "chatgpt" | "chatgpt-dark" | "glasscn") {
+                    restore_pet_window_layers(&app.clone());
+                    let _ = app.emit_to("pet", PET_BUBBLE_STYLE_CHANGE_EVENT, style.to_string());
+                    let _ = app.emit_to("pet_bubbles", PET_BUBBLE_STYLE_CHANGE_EVENT, style.to_string());
+                }
                 return;
             }
             if let Some(raw) = id.strip_prefix(PERMISSION_MENU_PREFIX) {

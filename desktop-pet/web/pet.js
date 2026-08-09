@@ -132,6 +132,13 @@
     const logical=_logicalSize(currentPetWindowSize.width,currentPetWindowSize.height);
     if(win&&logical&&typeof win.setSize==='function') win.setSize(logical).then(()=>_emitPetLayout()).catch(err=>console.warn('Failed to resize pet window',err));
   }
+  const BUBBLE_STYLE_KEY='hermes-pet-bubble-style';
+  const BUBBLE_STYLES=['default','chatgpt','chatgpt-dark','glasscn'];
+  function _applyBubbleStyle(style){
+    const next=BUBBLE_STYLES.includes(style)?style:'default';
+    document.body.dataset.bubbleStyle=next;
+    try{localStorage.setItem(BUBBLE_STYLE_KEY,next);}catch(_){}
+  }
   function _applyPetSkin(skinId,persist){
     const next=petSkins.find(skin=>skin.id===skinId)||petSkins[0];
     if(!next) return;
@@ -161,6 +168,11 @@
     const tauri=window.__TAURI__;
     if(!tauri||!tauri.event||typeof tauri.event.listen!=='function') return;
     try{await tauri.event.listen('pet-skin-change',event=>_applyPetSkin(String(event.payload||''),true));}catch(err){console.warn('Failed to listen for pet skin changes',err);}
+  }
+  async function _listenBubbleStyleChanges(){
+    const tauri=window.__TAURI__;
+    if(!tauri||!tauri.event||typeof tauri.event.listen!=='function') return;
+    try{await tauri.event.listen('pet-bubble-style-change',event=>_applyBubbleStyle(String(event.payload||'')));}catch(err){console.warn('Failed to listen for bubble style changes',err);}
   }
   async function _pollPetSkinSelection(){
     try{
@@ -518,7 +530,7 @@
     try{
       await _loadPetSkins();
       await _loadPreferences();
-      await tauri.event.emit('pet-context-menu',{skins:petSkins,activeSkinId:(_activeSkin()||{}).id||'keeper',permissions:petPreferences,menuLabels:_menuLabels()});
+      await tauri.event.emit('pet-context-menu',{skins:petSkins,activeSkinId:(_activeSkin()||{}).id||'keeper',activeBubbleStyle:localStorage.getItem(BUBBLE_STYLE_KEY)||'default',permissions:petPreferences,menuLabels:_menuLabels()});
     }catch(err){console.warn('Failed to open pet context menu',err);}
   }
   badge.addEventListener('click',_onBadgeActivate);
@@ -587,6 +599,10 @@
     await _loadPetSkins();
     await refresh();
     _listenPetSkinChanges();
+    let initialBubbleStyle='default';
+    try{initialBubbleStyle=localStorage.getItem(BUBBLE_STYLE_KEY)||'default';}catch(_){}
+    _applyBubbleStyle(initialBubbleStyle);
+    _listenBubbleStyleChanges();
     _pollPetSkinSelection();
     _listenPetRestartRequests();
     _listenPetWindowGeometry();
