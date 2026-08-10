@@ -602,11 +602,17 @@ fn build_tray(app: &tauri::AppHandle) -> Result<(), tauri::Error> {
                 let handle = app.clone();
                 let window_handle = handle.clone();
                 let _ = handle.run_on_main_thread(move || {
-                    if let Some(window) = window_handle.get_webview_window("pet") {
-                        if window.is_visible().unwrap_or(false) {
-                            let _ = window.hide();
-                        } else {
-                            let _ = window.show();
+                    let show = window_handle
+                        .get_webview_window("pet")
+                        .map(|window| !window.is_visible().unwrap_or(false))
+                        .unwrap_or(false);
+                    for label in ["pet", "pet_bubbles"] {
+                        if let Some(window) = window_handle.get_webview_window(label) {
+                            if show {
+                                let _ = window.show();
+                            } else {
+                                let _ = window.hide();
+                            }
                         }
                     }
                 });
