@@ -331,10 +331,21 @@ fn _persist_desktop_pet_preference(app: &tauri::AppHandle, enabled: bool) {
 
 fn _restart_native_process() {
     if let Ok(current_exe) = std::env::current_exe() {
-        let _ = Command::new(current_exe).spawn();
+        match Command::new(current_exe)
+            .env("HERMES_COMPANION_RESTARTING", "1")
+            .spawn()
+        {
+            Ok(_) => {
+                // 给新进程初始化时间（PE 加载 + 进入 main）；新进程侧对互斥做重试等待，
+                // 我们退出释放互斥后它即可继续，避免"新进程被单实例互斥拒绝 + 旧进程退出 = 全灭"
+                thread::sleep(Duration::from_millis(500));
+                process::exit(0);
+            }
+            Err(err) => {
+                eprintln!("failed to spawn restart process: {err}");
+            }
+        }
     }
-    thread::sleep(Duration::from_millis(80));
-    process::exit(0);
 }
 
 fn emit_pet_visibility(app: &tauri::AppHandle, visible: bool) {
@@ -768,7 +779,21 @@ fn sanitize_skin(skin: PetSkin) -> Option<PetSkin> {
 
 fn main() {
     #[cfg(target_os = "windows")]
-    let Some(_instance_mutex) = acquire_single_instance() else {
+    let Some(_instance_mutex) = (|| {
+        let restarting = std::env::var_os("HERMES_COMPANION_RESTARTING").is_some();
+        for _ in 0..=31 {
+            if let Some(mutex) = acquire_single_instance() {
+                return Some(mutex);
+            }
+            if !restarting {
+                return None;
+            }
+            // 重启路径：旧进程正在退出（500ms 后 exit 释放互斥），等待重试而非直接关闭
+            thread::sleep(Duration::from_millis(100));
+        }
+        None
+    })()
+    else {
         return;
     };
 
