@@ -987,6 +987,11 @@ function hermesCliCommand(options = {}) {
   return String(options.hermesCli || process.env.HERMES_DESKTOP_COMPANION_HERMES_CLI || process.env.HERMES_CLI || 'hermes');
 }
 
+function hermesCliArgs(options = {}, args = []) {
+  const moduleName = options.hermesCliModule || process.env.HERMES_DESKTOP_COMPANION_HERMES_CLI_MODULE;
+  return moduleName ? ['-m', String(moduleName), ...args] : args;
+}
+
 function hermesCliEnv(options = {}) {
   const env = { ...process.env };
   if (options.hermesPetsDir && path.basename(path.resolve(String(options.hermesPetsDir))) === 'pets') {
@@ -1009,7 +1014,7 @@ async function runHermesPetsCommand(options = {}, args = []) {
     let settled = false;
     let stdout = '';
     let stderr = '';
-    const child = spawn(command, args, {
+    const child = spawn(command, hermesCliArgs(options, args), {
       env: hermesCliEnv(options),
       stdio: ['ignore', 'pipe', 'pipe']
     });

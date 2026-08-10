@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::process;
 use std::io::{Read, Write};
 use std::net::TcpStream;
+use std::fs;
 use std::path::PathBuf;
 use std::process::{Child, Command};
 use std::sync::{atomic::AtomicBool, atomic::Ordering, Arc, Mutex};
@@ -119,6 +120,87 @@ fn assign_kill_on_close_job(child: &Child) -> Option<JobHandle> {
 }
 
 impl Sidecar {
+    #[cfg(target_os = "windows")]
+    fn hermes_cli_path() -> Option<PathBuf> {
+        for key in ["HERMES_DESKTOP_COMPANION_HERMES_CLI", "HERMES_CLI"] {
+            if let Some(path) = std::env::var_os(key).map(PathBuf::from) {
+                if path.is_file() && path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("exe")) {
+                    return Some(path);
+                }
+            }
+        }
+
+        if let Ok(output) = Command::new("where.exe").arg("hermes.exe").output() {
+            if output.status.success() {
+                if let Some(path) = String::from_utf8_lossy(&output.stdout).lines().next() {
+                    let path = PathBuf::from(path.trim());
+                    if path.is_file() {
+                        return Some(path);
+                    }
+                }
+            }
+        }
+
+        let mut candidates = Vec::new();
+        if let Some(user_profile) = std::env::var_os("USERPROFILE") {
+            let home = PathBuf::from(user_profile);
+            candidates.push(home.join(".local\\bin\\hermes.exe"));
+            candidates.push(home.join("scoop\\shims\\hermes.exe"));
+        }
+        if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+            candidates.push(PathBuf::from(local_app_data).join("Microsoft\\WinGet\\Links\\hermes.exe"));
+        }
+        if let Some(path) = candidates.into_iter().find(|path| path.is_file()) {
+            return Some(path);
+        }
+
+        // Hermes Desktop keeps its managed runtime under
+        // %USERPROFILE%\.hermes-web-ui\desktop-runtime\hermes\<version>\win-x64
+        // (verified 2026-08-10: active-version.json "runtimeDirectory" ->
+        // ...\hermes\0.20.0\win-x64, CLI = python.exe -m hermes_cli.main).
+        if let Some(user_profile) = std::env::var_os("USERPROFILE") {
+            let home = PathBuf::from(user_profile);
+            let runtime_root = home.join(".hermes-web-ui").join("desktop-runtime");
+            let mut version_dirs = Vec::new();
+            let active = runtime_root.join("active-version.json");
+            if let Ok(contents) = fs::read_to_string(active) {
+                if let Ok(value) = serde_json::from_str::<serde_json::Value>(&contents) {
+                    if let Some(dir) = value.get("runtimeDirectory").and_then(|v| v.as_str()) {
+                        let path = PathBuf::from(dir);
+                        let path = if path.is_absolute() { path } else { runtime_root.join(path) };
+                        // runtimeDirectory 是 arch 目录形态（...\hermes\<ver>\win-x64）：直接探测
+                        for python in [
+                            path.join("python").join("venv").join("Scripts").join("python.exe"),
+                            path.join("python").join("python.exe"),
+                        ] {
+                            if python.is_file() {
+                                return Some(python);
+                            }
+                        }
+                        // 也可能是 version_dir 形态（无 arch 段）：入队（优先于枚举结果）
+                        version_dirs.push(path);
+                    }
+                }
+            }
+            if let Ok(entries) = fs::read_dir(runtime_root.join("hermes")) {
+                version_dirs.extend(entries.flatten().map(|entry| entry.path()).filter(|path| path.is_dir()));
+            }
+            for version_dir in version_dirs {
+                for arch in ["win-x64", "win-x86"] {
+                    let python = version_dir.join(arch).join("python").join("venv").join("Scripts").join("python.exe");
+                    if python.is_file() {
+                        return Some(python);
+                    }
+                    let python = version_dir.join(arch).join("python").join("python.exe");
+                    if python.is_file() {
+                        return Some(python);
+                    }
+                }
+            }
+        }
+        None
+    }
+
     fn start() -> Result<Self, Box<dyn std::error::Error>> {
         if Self::healthy() {
             return Ok(Self {
@@ -145,6 +227,29 @@ impl Sidecar {
         }
         #[cfg(target_os = "windows")]
         {
+            if let Some(path) = Self::hermes_cli_path() {
+                let is_python = path
+                    .file_name()
+                    .is_some_and(|name| name.eq_ignore_ascii_case("python.exe"));
+                command.env("HERMES_DESKTOP_COMPANION_HERMES_CLI", path);
+                if is_python {
+                    command.env("HERMES_DESKTOP_COMPANION_HERMES_CLI_MODULE", "hermes_cli.main");
+                }
+            } else {
+                eprintln!("[hwdc] hermes.exe not found; gallery installs may fail");
+            }
+            // HERMES_HOME 对齐：Hermes CLI 0.20 在 Windows 默认
+            // %LOCALAPPDATA%\hermes（实测 pets install 装到 ...\hermes\pets），
+            // 而 sidecar 检查默认 ~\.hermes\pets——两边不一致会装完查不到
+            // （HTTP 200 + ok:false）。注入同一 home 使 CLI 与检查路径一致。
+            if std::env::var_os("HERMES_HOME").is_none() {
+                if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+                    let hermes_home = PathBuf::from(local_app_data).join("hermes");
+                    if hermes_home.is_dir() {
+                        command.env("HERMES_HOME", hermes_home);
+                    }
+                }
+            }
             use std::os::windows::process::CommandExt;
             command.creation_flags(0x08000000);
         }
