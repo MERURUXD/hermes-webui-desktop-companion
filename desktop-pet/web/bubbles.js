@@ -136,11 +136,19 @@
     const layout=_normalizeSkinLayout(next.layout);
     if(installSprite){installSprite.style.backgroundImage=`url("${next.spritesheetUrl}")`;installSprite.style.backgroundSize=`${layout.columns*100}% ${layout.rows*100}%`;}
   }
+  function _healActiveSkin(){
+    if(petSkins.some(skin=>skin.id===activeSkinId)) return;
+    const fallback=petSkins.find(skin=>skin.id==='keeper')||petSkins[0];
+    if(!fallback) return;
+    activeSkinId=fallback.id;
+    try{localStorage.setItem(SKIN_KEY,activeSkinId);}catch(_){}
+  }
   async function _loadPetSkins(){
     try{
       const data=await fetch('/api/pet/skins',{cache:'no-store'}).then(res=>{if(!res.ok) throw new Error(`Pet skins failed: ${res.status}`);return res.json();});
       const skins=(Array.isArray(data.skins)?data.skins:[]).map(_safeSkin).filter(Boolean);
       if(skins.length) petSkins=skins;
+      _healActiveSkin();
       _applyPetSkin(activeSkinId);
       return true;
     }catch(err){console.warn('Failed to load pet skins',err);_applyPetSkin(activeSkinId);return false;}

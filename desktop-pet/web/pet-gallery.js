@@ -147,7 +147,6 @@
       });
     }catch(error){
       console.warn('Failed to post pet skin selection',error);
-      throw error;
     }
     try{
       const tauri=window.__TAURI__;

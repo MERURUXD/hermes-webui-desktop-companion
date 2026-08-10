@@ -140,10 +140,13 @@
     try{localStorage.setItem(BUBBLE_STYLE_KEY,next);}catch(_){}
   }
   function _applyPetSkin(skinId,persist){
-    const next=petSkins.find(skin=>skin.id===skinId)||petSkins[0];
+    const requested=String(skinId||'').trim();
+    const next=petSkins.find(skin=>skin.id===requested)||petSkins[0];
     if(!next) return;
-    activeSkinId=next.id;
-    if(persist) localStorage.setItem(SKIN_KEY,next.id);
+    if(requested) activeSkinId=requested;
+    if(persist&&petSkins.some(skin=>skin.id===requested)){
+      try{localStorage.setItem(SKIN_KEY,requested);}catch(error){console.warn('Failed to save pet skin selection',error);}
+    }
     const layout=_normalizeSkinLayout(next.layout);
     _applyPetDisplaySize(layout);
     sprite.style.backgroundImage=`url("${next.spritesheetUrl}")`;
@@ -155,11 +158,19 @@
     stage.setAttribute('aria-label',next.displayName);
     shell.setAttribute('aria-label',_petT('desktop_pet_shell_label',next.displayName));
   }
+  function _healActiveSkin(){
+    if(petSkins.some(skin=>skin.id===activeSkinId)) return;
+    const fallback=petSkins.find(skin=>skin.id==='keeper')||petSkins[0];
+    if(!fallback) return;
+    activeSkinId=fallback.id;
+    try{localStorage.setItem(SKIN_KEY,activeSkinId);}catch(_){}
+  }
   async function _loadPetSkins(){
     try{
       const data=await fetch('/api/pet/skins',{cache:'no-store'}).then(res=>{if(!res.ok) throw new Error(`Pet skins failed: ${res.status}`);return res.json();});
       const skins=(Array.isArray(data.skins)?data.skins:[]).map(_safeSkin).filter(Boolean);
       if(skins.length) petSkins=skins;
+      _healActiveSkin();
       _applyPetSkin(activeSkinId,false);
       return true;
     }catch(err){console.warn('Failed to load pet skins',err);_applyPetSkin(activeSkinId,false);return false;}
@@ -179,9 +190,18 @@
       const data=await fetch(`/api/pet/skin_selection?since=${encodeURIComponent(String(lastSkinSelectionAt||0))}`,{cache:'no-store'}).then(res=>{if(!res.ok) throw new Error(`Pet skin selection failed: ${res.status}`);return res.json();});
       if(Number(data.updated_at_ms||0)>lastSkinSelectionAt) lastSkinSelectionAt=Number(data.updated_at_ms||0);
       const skinId=String(data.skin_id||'').trim();
-      if(data.changed&&skinId) {
+      if(skinId&&(data.changed||activeSkinId!==skinId)) {
         await _loadPetSkins();
-        _applyPetSkin(skinId,true);
+        if(petSkins.some(skin=>skin.id===skinId)){
+          _applyPetSkin(skinId,true);
+        }else{
+          const fallback=petSkins.find(skin=>skin.id==='keeper')||petSkins[0];
+          if(fallback){
+            activeSkinId=fallback.id;
+            try{localStorage.setItem(SKIN_KEY,activeSkinId);}catch(_){}
+            _applyPetSkin(activeSkinId,false);
+          }
+        }
       }
       return true;
     }catch(err){console.warn('Failed to poll pet skin selection',err);return false;}

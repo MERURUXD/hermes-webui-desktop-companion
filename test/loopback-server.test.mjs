@@ -1074,6 +1074,44 @@ test('pet skin selection can be set from the manager page', async () => {
   }
 });
 
+test('pet skin selection persists across sidecar restarts', async () => {
+  const tmpRoot = await mkdtemp(path.join(os.tmpdir(), 'hermes-companion-skin-selection-'));
+  const skinSelectionPath = path.join(tmpRoot, 'skin-selection.json');
+  let localServer = createServer({ preferencePath: null, skinSelectionPath });
+  await new Promise((resolve) => localServer.listen(0, '127.0.0.1', resolve));
+  try {
+    const address = localServer.address();
+    const url = `http://${address.address}:${address.port}`;
+    const selected = await fetch(`${url}/api/pet/skin_selection`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ skin_id: 'keeper' })
+    });
+    const selectedBody = await selected.json();
+    assert.equal(selected.status, 200);
+    assert.equal(selectedBody.skin_id, 'keeper');
+    assert.deepEqual(JSON.parse(await readFile(skinSelectionPath, 'utf8')), {
+      skin_id: 'keeper',
+      updated_at_ms: selectedBody.updated_at_ms,
+      updated_at: selectedBody.updated_at
+    });
+    await new Promise((resolve, reject) => localServer.close((error) => (error ? reject(error) : resolve())));
+
+    localServer = createServer({ preferencePath: null, skinSelectionPath });
+    await new Promise((resolve) => localServer.listen(0, '127.0.0.1', resolve));
+    const restartedAddress = localServer.address();
+    const restored = await fetch(`http://${restartedAddress.address}:${restartedAddress.port}/api/pet/skin_selection?since=0`);
+    const restoredBody = await restored.json();
+    assert.equal(restored.status, 200);
+    assert.equal(restoredBody.changed, true);
+    assert.equal(restoredBody.skin_id, 'keeper');
+    assert.equal(restoredBody.updated_at_ms, selectedBody.updated_at_ms);
+  } finally {
+    await new Promise((resolve) => localServer.close(() => resolve()));
+    await rm(tmpRoot, { recursive: true, force: true });
+  }
+});
+
 test('desktop pet devUrl supports HEAD probes', async () => {
   const response = await fetch(`${baseUrl}/pet`, { method: 'HEAD' });
   assert.equal(response.status, 200);

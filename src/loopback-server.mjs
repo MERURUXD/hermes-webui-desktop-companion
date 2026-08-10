@@ -133,6 +133,10 @@ function defaultPreferencePath() {
   return path.join(os.homedir(), '.hermes-webui-desktop-companion', 'preferences.json');
 }
 
+function defaultPetSkinSelectionPath() {
+  return path.join(os.homedir(), '.hermes-webui-desktop-companion', 'skin-selection.json');
+}
+
 function normalizePreferences(value) {
   const source = value && typeof value === 'object' ? value : {};
   return {
@@ -157,6 +161,32 @@ function savePreferences(preferencePath, preferences) {
   if (!preferencePath) return;
   mkdirSync(path.dirname(preferencePath), { recursive: true });
   writeFileSync(preferencePath, `${JSON.stringify(normalizePreferences(preferences), null, 2)}\n`, 'utf8');
+}
+
+function normalizePetSkinSelection(value) {
+  const source = value && typeof value === 'object' ? value : {};
+  const skinId = safeSkinId(source.skin_id || source.skinId);
+  const updatedAtMs = Number(source.updated_at_ms);
+  return {
+    skin_id: skinId,
+    updated_at_ms: skinId && Number.isFinite(updatedAtMs) && updatedAtMs > 0 ? updatedAtMs : 0,
+    updated_at: skinId && Number.isFinite(updatedAtMs) && updatedAtMs > 0 ? updatedAtMs / 1000 : null
+  };
+}
+
+function loadPetSkinSelection(selectionPath) {
+  if (!selectionPath) return normalizePetSkinSelection();
+  try {
+    return normalizePetSkinSelection(JSON.parse(readFileSync(selectionPath, 'utf8')));
+  } catch (_) {
+    return normalizePetSkinSelection();
+  }
+}
+
+function savePetSkinSelection(selectionPath, selection) {
+  if (!selectionPath) return;
+  mkdirSync(path.dirname(selectionPath), { recursive: true });
+  writeFileSync(selectionPath, `${JSON.stringify(normalizePetSkinSelection(selection), null, 2)}\n`, 'utf8');
 }
 
 async function readJson(req) {
@@ -1278,17 +1308,20 @@ export function createServer(options = {}) {
   const preferencePath = Object.prototype.hasOwnProperty.call(options, 'preferencePath')
     ? options.preferencePath
     : (process.env.HERMES_COMPANION_PREFERENCES_PATH || defaultPreferencePath());
+  const skinSelectionPath = Object.prototype.hasOwnProperty.call(options, 'skinSelectionPath')
+    ? options.skinSelectionPath
+    : (Object.prototype.hasOwnProperty.call(options, 'preferencePath') && options.preferencePath === null
+      ? null
+      : (process.env.HERMES_COMPANION_SKIN_SELECTION_PATH || defaultPetSkinSelectionPath()));
   let preferences = normalizePreferences(options.initialPreferences || loadPreferences(preferencePath));
   let latestSnapshot = null;
   let navigationCommands = [];
   let navigationLastPollAt = 0;
   let actionCommands = [];
   let nativeHostRegistration = null;
-  let petSkinSelection = {
-    skin_id: '',
-    updated_at_ms: 0,
-    updated_at: null
-  };
+  let petSkinSelection = normalizePetSkinSelection(
+    options.initialPetSkinSelection || loadPetSkinSelection(skinSelectionPath)
+  );
 
   function preferenceResponse() {
     return { ok: true, ...preferences, server_time: Date.now() / 1000 };
@@ -1371,6 +1404,7 @@ export function createServer(options = {}) {
       updated_at_ms: now,
       updated_at: now / 1000
     };
+    savePetSkinSelection(skinSelectionPath, petSkinSelection);
     return {
       ok: true,
       changed: true,
