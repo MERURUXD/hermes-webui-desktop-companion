@@ -60,7 +60,7 @@
     desktop_pet_approve:'Allow once',
     desktop_pet_deny:'Deny',
     desktop_pet_dismiss_update:'Dismiss update',
-    desktop_pet_failed_to_send:'Failed to send',
+
     desktop_pet_install_check_webui:'Checking WebUI connection',
     desktop_pet_install_load_skins:'Loading pet skins',
     desktop_pet_install_ready:'Ready',
@@ -79,7 +79,7 @@
     desktop_pet_ready_meta_completed:'Completed',
     desktop_pet_ready_meta_messages:'{0} messages',
     desktop_pet_ready_toast:'Ready to use. Drag the pet, right-click to switch skins, and click bubbles to open sessions.',
-    desktop_pet_reply:'Reply',
+
     desktop_pet_running:'Running',
     desktop_pet_sending:'Sending',
     desktop_pet_thinking:'Thinking',
@@ -345,14 +345,7 @@
     if(status==='running') return `<span class="pet-spinner" aria-label="${_esc(_petT('desktop_pet_running'))}"></span>`;
     return `<span class="pet-ready" aria-label="${_esc(_petT('desktop_pet_ready'))}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg></span>`;
   }
-  function _replyHtml(item){
-    if(replySid!==item.session_id) return '';
-    const pending=replyPendingSid===item.session_id;
-    const replyLabel=_petT('desktop_pet_reply');
-    const sendingLabel=_petT('desktop_pet_sending');
-    const activeLabel=pending?sendingLabel:replyLabel;
-    return `<form class="pet-reply" data-sid="${_esc(item.session_id)}"><input class="pet-reply-input" type="text" value="${_esc(replyText)}" placeholder="${_esc(activeLabel)}" aria-label="${_esc(replyLabel)}" autocomplete="off" ${pending?'disabled':''}><button class="pet-reply-submit" type="submit" ${pending?'disabled':''}>${_esc(activeLabel)}</button>${replyError?`<div class="pet-reply-error">${_esc(replyError)}</div>`:''}</form>`;
-  }
+
   function _actionPendingKey(item){
     if(!item||item.status!=='action_required') return '';
     if(item.actionType==='approval') return `approval:${item.session_id}:${item.action_required_approval_id||item.dismissKey||''}`;
@@ -404,6 +397,15 @@
     }
     if(action.type==='approval') await _performApprovalResponse(action);
     if(action.type==='clarify') _submitClarifyResponse(action.sid,action.clarifyId,action.response,action.pendingKey,action.onError,true);
+  }
+  async function _sendReplyDraft(sid,text,autosend){
+    await _openSessionInBrowser(sid,{draft:text,autosend});
+    _markViewed(sid);
+    replySid='';
+    replyText='';
+    replyPendingSid='';
+    replyError='';
+    render(true);
   }
   function _submitClarifyResponse(sid,clarifyId,response,pendingKey,onError,bypassPermission){
     const text=_clean(response);
@@ -562,7 +564,7 @@
     // signature and must always re-render so the card returns to running.
     const permissionSignature=pendingPermissionPrompt?`permission:${pendingPermissionPrompt.kind}:${pendingPermissionPrompt.action&&pendingPermissionPrompt.action.sid||''}`:'';
     const signature=`${permissionSignature}|${items.map(item=>`${item.session_id}~${item.status}~${item.dismissKey}`).join('|')}`;
-    const focusedInput=bubbles.contains(document.activeElement)&&(document.activeElement.classList.contains('pet-reply-input')||document.activeElement.classList.contains('clarify-custom-input'));
+    const focusedInput=bubbles.contains(document.activeElement)&&document.activeElement.classList.contains('clarify-custom-input');
     if(!force&&focusedInput&&signature===lastRenderedSignature) return;
     if(!force&&expandedActionKey&&signature===lastRenderedSignature&&typeof bubbles.matches==='function'&&bubbles.matches(':hover')) return;
     lastRenderedSignature=signature;
@@ -574,7 +576,7 @@
     bubbleContentHeightDirty=true;
     const visibleKeys=new Set(items.map(item=>item.dismissKey));
     if(expandedActionKey&&!visibleKeys.has(expandedActionKey)) expandedActionKey='';
-    bubbles.innerHTML=`<div class="pet-viewport" tabindex="0"><div class="pet-list" role="list">${_permissionPromptHtml()}${items.map(item=>{const expand=_expandHtml(item);const isExpanded=expand&&item.dismissKey===expandedActionKey;return `<article class="pet-card${expand?' has-expand':''}" role="listitem" tabindex="0" data-sid="${_esc(item.session_id)}" data-status="${item.status}" data-dismiss-key="${_esc(item.dismissKey)}" data-action-type="${_esc(item.actionType||'')}" data-reply-open="${replySid===item.session_id?'1':'0'}"${expand?` data-expanded="${isExpanded?'1':'0'}"`:''}><button class="pet-dismiss" type="button" aria-label="${_esc(_petT('desktop_pet_dismiss_update'))}"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="20" y1="4" x2="4" y2="20"/><line x1="4" y1="4" x2="20" y2="20"/></svg></button><div class="pet-card-main"><div><div class="pet-card-title" title="${_esc(item.title)}">${_titleHtml(item)}</div><div class="pet-card-text" title="${_esc(item.tooltip||item.text)}">${_esc(item.text)}</div></div><div class="pet-card-status">${_statusHtml(item)}</div></div>${expand}${item.status==='action_required'||replySid===item.session_id?'':`<button class="pet-reply-toggle" type="button">${_esc(_petT('desktop_pet_reply'))}</button>`}${_replyHtml(item)}${item.session_id===openingSid?'<div class="pet-card-opening" aria-hidden="true"><span class="pet-spinner"></span></div>':''}</article>`;}).join('')}</div></div><button class="pet-latest" type="button" hidden>${_esc(_petT('desktop_pet_latest'))}</button><button class="pet-more" type="button" hidden>+1</button>`;
+    bubbles.innerHTML=`<div class="pet-viewport" tabindex="0"><div class="pet-list" role="list">${_permissionPromptHtml()}${items.map(item=>{const expand=_expandHtml(item);const isExpanded=expand&&item.dismissKey===expandedActionKey;return `<article class="pet-card${expand?' has-expand':''}" role="listitem" tabindex="0" data-sid="${_esc(item.session_id)}" data-status="${item.status}" data-dismiss-key="${_esc(item.dismissKey)}" data-action-type="${_esc(item.actionType||'')}"${expand?` data-expanded="${isExpanded?'1':'0'}"`:''}><button class="pet-dismiss" type="button" aria-label="${_esc(_petT('desktop_pet_dismiss_update'))}"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="20" y1="4" x2="4" y2="20"/><line x1="4" y1="4" x2="20" y2="20"/></svg></button><div class="pet-card-main"><div><div class="pet-card-title" title="${_esc(item.title)}">${_titleHtml(item)}</div><div class="pet-card-text" title="${_esc(item.tooltip||item.text)}">${_esc(item.text)}</div></div><div class="pet-card-status">${_statusHtml(item)}</div></div>${expand}${item.session_id===openingSid?'<div class="pet-card-opening" aria-hidden="true"><span class="pet-spinner"></span></div>':''}</article>`;}).join('')}</div></div><button class="pet-latest" type="button" hidden>${_esc(_petT('desktop_pet_latest'))}</button><button class="pet-more" type="button" hidden>+1</button>`;
     requestAnimationFrame(_restoreViewport);
     _scheduleBubbleSync();
   }
@@ -606,7 +608,7 @@
   }
   function _hideOpenedReadySession(sid){
     sessions=sessions.filter(item=>!(item.session_id===sid&&item.status==='ready'));
-    if(replySid===sid) replySid='';
+
   }
   function _currentTauriWindow(){
     const tauri=window.__TAURI__;
@@ -918,39 +920,6 @@
       return null;
     }
   }
-  async function _sendReplyDraft(sid,text,autosend){
-    await _openSessionInBrowser(sid,{draft:text,autosend});
-    _markViewed(sid);
-    replySid='';
-    replyText='';
-    replyPendingSid='';
-    replyError='';
-    render(true);
-  }
-  async function _reply(card){
-    const sid=card&&card.dataset.sid;
-    const input=card&&card.querySelector('.pet-reply-input');
-    const text=_clean(input&&input.value);
-    if(!sid||!text){if(input) input.focus();return;}
-    replyPendingSid=sid;
-    replyError='';
-    render(true);
-    try{
-      if(!petPreferences.allow_direct_send){
-        replyPendingSid='';
-        pendingPermissionPrompt={kind:'direct_send',action:{type:'direct_send',sid,text}};
-        render(true);
-        return;
-      }
-      await _sendReplyDraft(sid,text,true);
-    }catch(err){
-      console.warn('Failed to reply from pet',err);
-      replyPendingSid='';
-      replyError=_petT('desktop_pet_failed_to_send');
-      render(true);
-      setTimeout(()=>document.querySelector('.pet-reply-input')?.focus(),0);
-    }
-  }
   if(welcomeAction){
     welcomeAction.addEventListener('click',event=>{
       event.preventDefault();
@@ -978,7 +947,7 @@
     if(!card) return;
     if(card.classList.contains('pet-permission-card')) return;
     if(target.closest('.pet-dismiss')){dismissed[card.dataset.dismissKey||`${card.dataset.sid}:${card.dataset.status}`]=true;_writeJson(DISMISSED_KEY,dismissed);render();return;}
-    if(target.closest('.pet-reply-toggle')){replySid=replySid===card.dataset.sid?'':card.dataset.sid;replyText='';replyError='';render(true);setTimeout(()=>document.querySelector('.pet-reply-input')?.focus(),0);return;}
+
     const approveBtn=target.closest('.btn-approve');
     if(approveBtn){
       event.preventDefault();
@@ -1022,7 +991,7 @@
       return;
     }
     if(target.closest('.pet-card-expand')) return;
-    if(target.closest('.pet-reply')) return;
+
     if(card.dataset.status==='action_required'){
       if(card.classList.contains('has-expand')) _setExpandedActionCard(card,true);
       return;
@@ -1060,20 +1029,15 @@
       _submitClarifyResponse(custom.dataset.sid,custom.dataset.clarifyId||'',input&&input.value,pendingKey,()=>input&&input.focus());
       return;
     }
-    _reply(event.target.closest('.pet-card'));
   });
   bubbles.addEventListener('input',event=>{
-    if(event.target.classList.contains('pet-reply-input')) replyText=event.target.value;
     if(event.target.classList.contains('clarify-custom-input')){
       const form=event.target.closest('.clarify-custom');
       if(form) clarifyDrafts[form.dataset.pendingKey||`clarify:${form.dataset.sid}:${form.dataset.clarifyId||''}`]=event.target.value;
     }
   });
   bubbles.addEventListener('scroll',event=>{if(event.target.classList.contains('pet-viewport')){bubbleScrollTop=event.target.scrollTop;_syncViewport();}},true);
-  bubbles.addEventListener('keydown',event=>{
-    if(!event.target.classList||!event.target.classList.contains('pet-reply-input')) return;
-    if(event.key==='Enter'&&!event.shiftKey&&!event.isComposing){event.preventDefault();_reply(event.target.closest('.pet-card'));}
-  });
+
   window.addEventListener('storage',event=>{
     if(![COLLAPSED_KEY,DISMISSED_KEY,SKIN_KEY,COLLAPSE_EXPLICIT_KEY].includes(event.key)) return;
     if(event.key===SKIN_KEY){
