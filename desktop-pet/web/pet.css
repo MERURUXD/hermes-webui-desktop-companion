@@ -3,8 +3,6 @@
 body[data-bubble-style="chatgpt"]{--pet-bubble:rgba(255,255,255,.75);--pet-text:#33384d;--pet-border:rgba(255,255,255,.9);--pet-muted:#7d8296;--pet-surface:rgba(240,242,250,.92);--pet-surface-strong:rgba(250,251,255,.96);--pet-input-bg:#fbfcff;--pet-code-bg:rgba(0,0,0,.05);--pet-highlight:rgba(255,255,255,.95);--pet-shadow:0 1px 2px rgba(20,24,45,.05),0 8px 24px rgba(20,24,45,.10);--pet-card-blur:20px;--pet-card-saturate:1.5;}
 /* 气泡样式预设：ChatGPT 暗色风（中性灰半透明+细亮边，暗色阅读场景；投影轻，避免边缘暗晕） */
 body[data-bubble-style="chatgpt-dark"]{--pet-bubble:rgba(31,31,33,.85);--pet-text:#f0f1f3;--pet-border:rgba(255,255,255,.14);--pet-muted:#a0a2a8;--pet-surface:rgba(43,43,46,.9);--pet-surface-strong:rgba(36,36,39,.95);--pet-input-bg:#2a2a2d;--pet-code-bg:rgba(0,0,0,.3);--pet-overlay:rgba(18,18,20,.7);--pet-scrim:rgba(18,18,20,.75);--pet-btn-inactive-bg:#4c4c51;--pet-border-soft:rgba(255,255,255,.1);--pet-hover-bg:#313134;--pet-highlight:rgba(255,255,255,.06);--pet-shadow:0 1px 2px rgba(0,0,0,.25),0 8px 20px rgba(0,0,0,.28);--pet-card-blur:16px;--pet-card-saturate:1.4;}
-/* 气泡样式预设：glasscn 液态玻璃（Apple Liquid Glass 简化版：顶部高光+细亮边+轻投影；透明窗口无 blur，靠透出+高光营造玻璃感） */
-body[data-bubble-style="glasscn"]{--pet-bubble:rgba(255,255,255,.14);--pet-text:#2a2f45;--pet-border:rgba(255,255,255,.4);--pet-muted:#70768c;--pet-surface:rgba(255,255,255,.3);--pet-surface-strong:rgba(255,255,255,.5);--pet-input-bg:rgba(255,255,255,.6);--pet-code-bg:rgba(0,0,0,.05);--pet-overlay:rgba(255,255,255,.3);--pet-scrim:rgba(240,242,250,.5);--pet-highlight:rgba(255,255,255,.55);--pet-shadow:inset 0 -10px 20px -12px rgba(255,255,255,.4),inset 1px 0 0 0 rgba(255,255,255,.18),inset -1px 0 0 0 rgba(255,255,255,.14),0 2px 8px rgba(15,23,42,.10),0 16px 40px -14px rgba(15,23,42,.22);--pet-card-blur:12px;--pet-card-saturate:1.8;--pet-glass-sheen:radial-gradient(80% 55% at 20% 0%,rgba(255,255,255,.45) 0%,rgba(255,255,255,.12) 45%,rgba(255,255,255,0) 70%),linear-gradient(180deg,rgba(255,255,255,.08) 0%,rgba(255,255,255,0) 50%);}
 html,body{margin:0;width:100%;height:100%;background:transparent;overflow:hidden;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei","PingFang SC","Noto Sans CJK SC",sans-serif;}
 body{position:relative;outline:0;box-shadow:none;}
 .pet-body{width:var(--pet-window-width);height:var(--pet-window-height);cursor:default;}
@@ -52,23 +50,6 @@ body{position:relative;outline:0;box-shadow:none;}
 .pet-bubbles.has-hidden-above::before{content:"";position:absolute;left:2px;right:2px;top:0;height:8px;pointer-events:none;background:linear-gradient(to top,rgba(241,243,250,0),var(--pet-scrim));border-radius:22px 22px 0 0;z-index:2;}
 .pet-list{display:flex;flex-direction:column;gap:7px;}
 .pet-card{position:relative;box-sizing:border-box;width:100%;min-height:0;padding:8px 10px 9px 36px;border:var(--pet-border-width) solid var(--pet-border);border-radius:18px;background-color:var(--pet-bubble);background-image:var(--pet-glass-sheen,none);background-repeat:no-repeat;color:var(--pet-text);box-shadow:inset 0 1px 0 var(--pet-highlight),var(--pet-shadow);cursor:pointer;overflow:hidden;-webkit-backdrop-filter:blur(var(--pet-card-blur,0px)) saturate(var(--pet-card-saturate,1)) brightness(var(--pet-card-brightness,1));backdrop-filter:blur(var(--pet-card-blur,0px)) saturate(var(--pet-card-saturate,1)) brightness(var(--pet-card-brightness,1));}
-/* glasscn 预设：假玻璃 + 折射边缘光
-   假玻璃 = 卡片内部模糊装饰层（filter:blur 模糊自身渐变，被 overflow:hidden 裁剪），
-   透明窗口下桌面 blur 不可行，用内部模糊渐变模拟"玻璃下的色斑"；
-   保留 backdrop-filter:url() 折射滤镜（对窗口内重叠内容生效） */
-body[data-bubble-style="glasscn"] .pet-card{
-  isolation:isolate;
-  -webkit-backdrop-filter:url(#pet-refract) blur(12px) saturate(1.8);
-  backdrop-filter:url(#pet-refract) blur(12px) saturate(1.8);
-}
-body[data-bubble-style="glasscn"] .pet-card::before{
-  content:"";position:absolute;inset:-25%;z-index:-1;pointer-events:none;
-  background:radial-gradient(55% 45% at 22% 12%,rgba(255,170,110,.55) 0%,rgba(255,170,110,0) 70%),
-             radial-gradient(50% 40% at 82% 28%,rgba(120,170,255,.5) 0%,rgba(120,170,255,0) 70%),
-             radial-gradient(60% 50% at 45% 95%,rgba(255,130,190,.42) 0%,rgba(255,130,190,0) 70%),
-             linear-gradient(135deg,rgba(255,255,255,.4) 0%,rgba(255,255,255,.06) 100%);
-  filter:blur(16px) saturate(1.5);
-}
 .pet-card-main,.pet-card-title,.pet-card-text,.pet-card-status,.pet-ready,.pet-action-required,.pet-spinner{cursor:pointer;}
 .pet-card:focus-visible{outline:2px solid #8b5cf6;outline-offset:3px;}
 .pet-card-main{display:grid;grid-template-columns:minmax(0,1fr) 20px;gap:6px;align-items:start;}

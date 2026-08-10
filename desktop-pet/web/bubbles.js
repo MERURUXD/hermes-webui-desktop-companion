@@ -123,7 +123,7 @@
     return {id,displayName,spritesheetUrl,layout:_normalizeSkinLayout(skin.layout)};
   }
   const BUBBLE_STYLE_KEY='hermes-pet-bubble-style';
-  const BUBBLE_STYLES=['default','chatgpt','chatgpt-dark','glasscn'];
+  const BUBBLE_STYLES=['default','chatgpt','chatgpt-dark'];
   function _applyBubbleStyle(style){
     const next=BUBBLE_STYLES.includes(style)?style:'default';
     document.body.dataset.bubbleStyle=next;
@@ -167,14 +167,7 @@
     if(!tauri||!tauri.event||typeof tauri.event.listen!=='function') return;
     try{await tauri.event.listen('pet-bubble-style-change',event=>_applyBubbleStyle(String(event.payload||'')));}catch(err){console.warn('Failed to listen for bubble style changes',err);}
   }
-  // 注入 glasscn 液态玻璃的 SVG 折射滤镜（feDisplacementMap 边缘畸变，WebView2 支持 backdrop-filter:url()）
-  function _injectRefractFilter(){
-    if(document.getElementById('pet-refract')) return;
-    const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');
-    svg.setAttribute('width','0');svg.setAttribute('height','0');svg.style.position='absolute';
-    svg.innerHTML='<defs><filter id="pet-refract" x="-20%" y="-20%" width="140%" height="140%" colorInterpolationFilters="sRGB"><feGaussianBlur in="SourceGraphic" stdDeviation="4" result="pet-blur"/><feDisplacementMap in="pet-blur" in2="SourceAlpha" scale="10" xChannelSelector="R" yChannelSelector="G"/></filter></defs>';
-    document.body.appendChild(svg);
-  }
+
   function _setInstallStatus(statusKey){
     if(installTitle) installTitle.textContent=_petT('desktop_pet_install_title');
     if(installStatus) installStatus.textContent=_petT(statusKey);
@@ -1080,7 +1073,7 @@
     try{initialBubbleStyle=localStorage.getItem(BUBBLE_STYLE_KEY)||'default';}catch(_){}
     _applyBubbleStyle(initialBubbleStyle);
     _listenBubbleStyleChanges();
-    _injectRefractFilter();
+
   }
   _bootBubbles();
 })();

@@ -690,10 +690,10 @@ const TRAY_QUIT_ID: &str = "tray_quit";
 
 fn build_tray(app: &tauri::AppHandle) -> Result<(), tauri::Error> {
     let menu = MenuBuilder::new(app)
-        .text(TRAY_TOGGLE_ID, "显示/隐藏宠物")
-        .text(TRAY_OPEN_WEBUI_ID, "打开 WebUI")
+        .text(TRAY_TOGGLE_ID, "Show/Hide pet")
+        .text(TRAY_OPEN_WEBUI_ID, "Open WebUI")
         .separator()
-        .text(TRAY_QUIT_ID, "退出")
+        .text(TRAY_QUIT_ID, "Quit")
         .build()?;
     // 显式设置托盘图标：不依赖 default_window_icon（Windows 上可能为 None 导致托盘空白）
     let tray_icon = tauri::image::Image::from_bytes(include_bytes!("../icons/32x32.png"))
@@ -944,22 +944,18 @@ fn main() {
                             label.to_string()
                         }
                     };
-                    let Ok(style_menu) = SubmenuBuilder::new(&menu_handle, "气泡样式")
+                    let Ok(style_menu) = SubmenuBuilder::new(&menu_handle, "Bubble style")
                         .text(
                             format!("{BUBBLE_STYLE_PREFIX}default"),
-                            bubble_style_label("default", "经典"),
+                            bubble_style_label("default", "Classic"),
                         )
                         .text(
                             format!("{BUBBLE_STYLE_PREFIX}chatgpt"),
-                            bubble_style_label("chatgpt", "半透明（ChatGPT 风）"),
+                            bubble_style_label("chatgpt", "Translucent (ChatGPT)"),
                         )
                         .text(
                             format!("{BUBBLE_STYLE_PREFIX}chatgpt-dark"),
-                            bubble_style_label("chatgpt-dark", "GPT 暗色"),
-                        )
-                        .text(
-                            format!("{BUBBLE_STYLE_PREFIX}glasscn"),
-                            bubble_style_label("glasscn", "液态玻璃（glasscn）"),
+                            bubble_style_label("chatgpt-dark", "GPT dark"),
                         )
                         .build()
                     else {

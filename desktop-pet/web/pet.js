@@ -88,7 +88,7 @@
       return await res.json();
     }catch(err){console.warn('Failed to open WebUI from pet',err);return null;}
   }
-  function _menuLabels(){return {switchSkin:_petT('desktop_pet_switch_skin'),managePets:_petT('desktop_pet_manage_pets'),restartPet:_petT('desktop_pet_restart'),closePet:_petT('desktop_pet_close'),permissionsControl:_petT('desktop_pet_permissions_control'),allowDirectSend:_petT('desktop_pet_permission_allow_direct_send'),allowInlineActionResponses:_petT('desktop_pet_permission_allow_inline_actions')};}
+
   function _localizeStaticLabels(){
     if(typeof applyLocaleToDOM==='function') applyLocaleToDOM();
     document.title=_petT('desktop_pet_title');
@@ -133,7 +133,7 @@
     if(win&&logical&&typeof win.setSize==='function') win.setSize(logical).then(()=>_emitPetLayout()).catch(err=>console.warn('Failed to resize pet window',err));
   }
   const BUBBLE_STYLE_KEY='hermes-pet-bubble-style';
-  const BUBBLE_STYLES=['default','chatgpt','chatgpt-dark','glasscn'];
+  const BUBBLE_STYLES=['default','chatgpt','chatgpt-dark'];
   function _applyBubbleStyle(style){
     const next=BUBBLE_STYLES.includes(style)?style:'default';
     document.body.dataset.bubbleStyle=next;
@@ -530,7 +530,7 @@
     try{
       await _loadPetSkins();
       await _loadPreferences();
-      await tauri.event.emit('pet-context-menu',{skins:petSkins,activeSkinId:(_activeSkin()||{}).id||'keeper',activeBubbleStyle:localStorage.getItem(BUBBLE_STYLE_KEY)||'default',permissions:petPreferences,menuLabels:_menuLabels()});
+      await tauri.event.emit('pet-context-menu',{skins:petSkins,activeSkinId:(_activeSkin()||{}).id||'keeper',activeBubbleStyle:localStorage.getItem(BUBBLE_STYLE_KEY)||'default',permissions:petPreferences});
     }catch(err){console.warn('Failed to open pet context menu',err);}
   }
   badge.addEventListener('click',_onBadgeActivate);
