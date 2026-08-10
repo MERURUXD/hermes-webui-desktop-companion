@@ -27,6 +27,7 @@ const PET_CONTEXT_MENU_EVENT: &str = "pet-context-menu";
 const PET_SKIN_CHANGE_EVENT: &str = "pet-skin-change";
 const PET_RESTART_REQUESTED_EVENT: &str = "pet-restart-requested";
 const PET_RAISE_REQUESTED_EVENT: &str = "pet-raise-requested";
+const PET_VISIBILITY_CHANGE_EVENT: &str = "pet-visibility-change";
 const PET_PERMISSION_TOGGLE_EVENT: &str = "pet-permission-toggle";
 const SKIN_MENU_PREFIX: &str = "skin:";
 const PERMISSION_MENU_PREFIX: &str = "permission:";
@@ -336,6 +337,19 @@ fn _restart_native_process() {
     process::exit(0);
 }
 
+fn emit_pet_visibility(app: &tauri::AppHandle, visible: bool) {
+    for label in ["pet", "pet_bubbles"] {
+        let _ = app.emit_to(label, PET_VISIBILITY_CHANGE_EVENT, visible);
+    }
+    let retry_app = app.clone();
+    thread::spawn(move || {
+        thread::sleep(Duration::from_millis(600));
+        for label in ["pet", "pet_bubbles"] {
+            let _ = retry_app.emit_to(label, PET_VISIBILITY_CHANGE_EVENT, visible);
+        }
+    });
+}
+
 fn lower_pet_windows_for_menu(app: &tauri::AppHandle) {
     for label in ["pet", "pet_bubbles"] {
         if let Some(window) = app.get_webview_window(label) {
@@ -539,19 +553,6 @@ struct PetContextMenuPayload {
     active_skin_id: Option<String>,
     active_bubble_style: Option<String>,
     permissions: Option<PetPermissionsPayload>,
-    menu_labels: Option<PetContextMenuLabels>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct PetContextMenuLabels {
-    switch_skin: Option<String>,
-    manage_pets: Option<String>,
-    permissions_control: Option<String>,
-    allow_direct_send: Option<String>,
-    allow_inline_action_responses: Option<String>,
-    restart_pet: Option<String>,
-    close_pet: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -680,7 +681,6 @@ fn pet_context_menu_payload(payload: &str) -> PetContextMenuPayload {
         active_skin_id: Some("keeper".into()),
         active_bubble_style: None,
         permissions: None,
-        menu_labels: None,
     })
 }
 
@@ -688,7 +688,7 @@ const TRAY_TOGGLE_ID: &str = "tray_toggle_pet";
 const TRAY_OPEN_WEBUI_ID: &str = "tray_open_webui";
 const TRAY_QUIT_ID: &str = "tray_quit";
 
-fn build_tray(app: &tauri::AppHandle) -> Result<(), tauri::Error> {
+fn build_tray(app: &tauri::AppHandle, user_hidden: Arc<AtomicBool>) -> Result<(), tauri::Error> {
     let menu = MenuBuilder::new(app)
         .text(TRAY_TOGGLE_ID, "Show/Hide pet")
         .text(TRAY_OPEN_WEBUI_ID, "Open WebUI")
@@ -702,15 +702,22 @@ fn build_tray(app: &tauri::AppHandle) -> Result<(), tauri::Error> {
         .icon(tray_icon)
         .menu(&menu)
         .show_menu_on_left_click(true)
-        .on_menu_event(|app, event| match event.id().as_ref() {
+        .on_menu_event(move |app, event| match event.id().as_ref() {
             TRAY_TOGGLE_ID => {
                 let handle = app.clone();
                 let window_handle = handle.clone();
+                let hidden_state = user_hidden.clone();
                 let _ = handle.run_on_main_thread(move || {
-                    let show = window_handle
-                        .get_webview_window("pet")
-                        .map(|window| !window.is_visible().unwrap_or(false))
-                        .unwrap_or(false);
+                    let show = if hidden_state.load(Ordering::SeqCst) {
+                        true
+                    } else {
+                        window_handle
+                            .get_webview_window("pet")
+                            .map(|window| !window.is_visible().unwrap_or(false))
+                            .unwrap_or(false)
+                    };
+                    hidden_state.store(!show, Ordering::SeqCst);
+                    emit_pet_visibility(&window_handle, show);
                     for label in ["pet", "pet_bubbles"] {
                         if let Some(window) = window_handle.get_webview_window(label) {
                             if show {
@@ -730,25 +737,6 @@ fn build_tray(app: &tauri::AppHandle) -> Result<(), tauri::Error> {
     Ok(())
 }
 
-
-fn menu_label(value: Option<&String>, fallback: &str) -> String {
-    let label = value
-        .map(|raw| raw.trim())
-        .filter(|raw| !raw.is_empty())
-        .unwrap_or(fallback);
-    let cleaned = label
-        .chars()
-        .filter(|ch| !ch.is_control())
-        .take(64)
-        .collect::<String>()
-        .trim()
-        .to_string();
-    if cleaned.is_empty() {
-        fallback.into()
-    } else {
-        cleaned
-    }
-}
 
 fn valid_skin_id(id: &str) -> bool {
     !id.is_empty()
@@ -789,11 +777,14 @@ fn main() {
     let restart_requested_for_menu = restart_requested.clone();
     let bubble_visible_state = Arc::new(Mutex::new(false));
     let bubble_visible_state_for_setup = bubble_visible_state.clone();
+    let user_hidden = Arc::new(AtomicBool::new(false));
+    let user_hidden_for_setup = user_hidden.clone();
+    let user_hidden_for_tray = user_hidden.clone();
     tauri::Builder::default()
         .setup(move |app| {
             let sidecar = Sidecar::start().map_err(|error| error.to_string())?;
             app.manage(sidecar);
-            build_tray(app.handle())?;
+            build_tray(app.handle(), user_hidden_for_tray.clone())?;
 
             navigate_window_to_webui(app, "pet", "/pet");
             navigate_window_to_webui(app, "pet_bubbles", "/pet/bubbles");
@@ -820,6 +811,7 @@ fn main() {
             restore_pet_window_layers_during_startup(app.handle().clone());
             let raise_handle = app.handle().clone();
             let raise_visible_state = bubble_visible_state_for_setup.clone();
+            let raise_user_hidden = user_hidden_for_setup.clone();
             app.listen(PET_RAISE_REQUESTED_EVENT, move |event| {
                 let handle = raise_handle.clone();
                 let window_handle = handle.clone();
@@ -831,10 +823,14 @@ fn main() {
                     .as_ref()
                     .and_then(|payload| payload.visible)
                     .unwrap_or(true);
+                if raise_user_hidden.load(Ordering::SeqCst) && visible {
+                    return;
+                }
                 let focus = payload
                     .as_ref()
                     .and_then(|payload| payload.focus)
                     .unwrap_or(false);
+                let hidden_state = raise_user_hidden.clone();
                 let _ = runner_handle.run_on_main_thread(move || {
                     apply_bubble_visibility(&control_handle, &visible_state, visible, focus);
                     if let Some(window) = window_handle.get_webview_window("pet") {
@@ -842,15 +838,21 @@ fn main() {
                         set_native_ignore_cursor_events(&window, false);
                         set_pet_window_level(&window);
                         install_first_click_handler(&window);
-                        let _ = window.show();
+                        if !hidden_state.load(Ordering::SeqCst) {
+                            let _ = window.show();
+                        }
                     }
                 });
             });
             let app_handle = app.handle().clone();
             let attention_visible_state = bubble_visible_state_for_setup.clone();
+            let attention_user_hidden = user_hidden_for_setup.clone();
             app.listen("pet-attention-update", move |event| {
                 let handle = app_handle.clone();
                 let visible = parse_attention_visibility(event.payload());
+                if attention_user_hidden.load(Ordering::SeqCst) && visible {
+                    return;
+                }
                 let handle_for_window = handle.clone();
                 let visible_state = attention_visible_state.clone();
                 let should_apply = visible_state
@@ -880,34 +882,7 @@ fn main() {
                         return;
                     };
                     lower_pet_windows_for_menu(&menu_handle);
-                    let labels = payload.menu_labels.as_ref();
-                    let switch_skin_label = menu_label(
-                        labels.and_then(|item| item.switch_skin.as_ref()),
-                        "Switch skin",
-                    );
-                    let manage_pets_label = menu_label(
-                        labels.and_then(|item| item.manage_pets.as_ref()),
-                        "Manage pets...",
-                    );
-                    let permissions_control_label = menu_label(
-                        labels.and_then(|item| item.permissions_control.as_ref()),
-                        "Permission control",
-                    );
-                    let allow_direct_send_label = menu_label(
-                        labels.and_then(|item| item.allow_direct_send.as_ref()),
-                        "Direct send",
-                    );
-                    let allow_inline_action_responses_label = menu_label(
-                        labels.and_then(|item| item.allow_inline_action_responses.as_ref()),
-                        "Approval / clarify responses",
-                    );
-                    let restart_pet_label = menu_label(
-                        labels.and_then(|item| item.restart_pet.as_ref()),
-                        "Restart pet",
-                    );
-                    let close_pet_label =
-                        menu_label(labels.and_then(|item| item.close_pet.as_ref()), "Close pet");
-                    let mut skin_builder = SubmenuBuilder::new(&menu_handle, switch_skin_label);
+                    let mut skin_builder = SubmenuBuilder::new(&menu_handle, "Switch skin");
                     let active_skin_id = payload
                         .active_skin_id
                         .as_deref()
@@ -935,7 +910,7 @@ fn main() {
                     let active_bubble_style = payload
                         .active_bubble_style
                         .as_deref()
-                        .filter(|style| matches!(*style, "default" | "chatgpt" | "chatgpt-dark" | "glasscn"))
+                        .filter(|style| matches!(*style, "default" | "chatgpt" | "chatgpt-dark"))
                         .unwrap_or("default");
                     let bubble_style_label = |name: &str, label: &str| {
                         if name == active_bubble_style {
@@ -951,11 +926,11 @@ fn main() {
                         )
                         .text(
                             format!("{BUBBLE_STYLE_PREFIX}chatgpt"),
-                            bubble_style_label("chatgpt", "Translucent (ChatGPT)"),
+                            bubble_style_label("chatgpt", "ChatGPT Light"),
                         )
                         .text(
                             format!("{BUBBLE_STYLE_PREFIX}chatgpt-dark"),
-                            bubble_style_label("chatgpt-dark", "GPT dark"),
+                            bubble_style_label("chatgpt-dark", "ChatGPT Dark"),
                         )
                         .build()
                     else {
@@ -971,31 +946,29 @@ fn main() {
                         .as_ref()
                         .and_then(|item| item.allow_inline_action_responses)
                         .unwrap_or(false);
-                    let direct_send_label = if allow_direct_send {
-                        format!("{} ✓", allow_direct_send_label)
-                    } else {
-                        allow_direct_send_label
-                    };
-                    let inline_action_label = if allow_inline_action_responses {
-                        format!("{} ✓", allow_inline_action_responses_label)
-                    } else {
-                        allow_inline_action_responses_label
-                    };
                     let Ok(permission_menu) =
-                        SubmenuBuilder::new(&menu_handle, permissions_control_label)
+                        SubmenuBuilder::new(&menu_handle, "Permissions")
                             .text(
                                 format!(
                                     "{PERMISSION_MENU_PREFIX}allow_direct_send:{}",
                                     !allow_direct_send
                                 ),
-                                direct_send_label,
+                                if allow_direct_send {
+                                    "Allow direct send ✓".to_string()
+                                } else {
+                                    "Allow direct send".to_string()
+                                },
                             )
                             .text(
                                 format!(
                                     "{PERMISSION_MENU_PREFIX}allow_inline_action_responses:{}",
                                     !allow_inline_action_responses
                                 ),
-                                inline_action_label,
+                                if allow_inline_action_responses {
+                                    "Allow approval / clarify responses ✓".to_string()
+                                } else {
+                                    "Allow approval / clarify responses".to_string()
+                                },
                             )
                             .build()
                     else {
@@ -1004,12 +977,12 @@ fn main() {
                     let Ok(menu) = MenuBuilder::new(&menu_handle)
                         .item(&skin_menu)
                         .item(&style_menu)
-                        .text(MANAGE_PETS_MENU_ID, manage_pets_label)
+                        .text(MANAGE_PETS_MENU_ID, "Manage pets...")
                         .separator()
                         .item(&permission_menu)
                         .separator()
-                        .text(RESTART_PET_MENU_ID, restart_pet_label)
-                        .text(CLOSE_PET_MENU_ID, close_pet_label)
+                        .text(RESTART_PET_MENU_ID, "Restart pet")
+                        .text(CLOSE_PET_MENU_ID, "Close pet")
                         .build()
                     else {
                         return;
@@ -1033,7 +1006,7 @@ fn main() {
                 return;
             }
             if let Some(style) = id.strip_prefix(BUBBLE_STYLE_PREFIX) {
-                if matches!(style, "default" | "chatgpt" | "chatgpt-dark" | "glasscn") {
+                if matches!(style, "default" | "chatgpt" | "chatgpt-dark") {
                     restore_pet_window_layers(&app.clone());
                     let _ = app.emit_to("pet", PET_BUBBLE_STYLE_CHANGE_EVENT, style.to_string());
                     let _ = app.emit_to("pet_bubbles", PET_BUBBLE_STYLE_CHANGE_EVENT, style.to_string());

@@ -1,6 +1,6 @@
 import http from 'node:http';
 import { spawn } from 'node:child_process';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -185,8 +185,11 @@ function loadPetSkinSelection(selectionPath) {
 
 function savePetSkinSelection(selectionPath, selection) {
   if (!selectionPath) return;
-  mkdirSync(path.dirname(selectionPath), { recursive: true });
-  writeFileSync(selectionPath, `${JSON.stringify(normalizePetSkinSelection(selection), null, 2)}\n`, 'utf8');
+  const dir = path.dirname(selectionPath);
+  mkdirSync(dir, { recursive: true });
+  const tmpPath = path.join(dir, `.skin-selection-${process.pid}.tmp`);
+  writeFileSync(tmpPath, `${JSON.stringify(normalizePetSkinSelection(selection), null, 2)}\n`, 'utf8');
+  renameSync(tmpPath, selectionPath);
 }
 
 async function readJson(req) {
@@ -1404,7 +1407,11 @@ export function createServer(options = {}) {
       updated_at_ms: now,
       updated_at: now / 1000
     };
-    savePetSkinSelection(skinSelectionPath, petSkinSelection);
+    try {
+      savePetSkinSelection(skinSelectionPath, petSkinSelection);
+    } catch (error) {
+      console.warn('Failed to save pet skin selection', error);
+    }
     return {
       ok: true,
       changed: true,

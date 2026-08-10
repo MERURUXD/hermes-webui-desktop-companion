@@ -32,7 +32,7 @@
   const welcomeCountdown=document.getElementById('petWelcomeCountdown');
   const welcomeAction=document.getElementById('petWelcomeAction');
   let sessions=[], dismissed=_readJson(DISMISSED_KEY,{}), replySid='', replyText='', replyPendingSid='', replyError='';
-  let bubbleScrollTop=0, latestPetLayout=null, visibleMode='hidden', layoutSeq=0;
+  let bubbleScrollTop=0, latestPetLayout=null, visibleMode='hidden', layoutSeq=0, userHidden=false;
   let petSkins=[{id:'keeper',displayName:'May',spritesheetUrl:'/extensions/pets/keeper/spritesheet.webp',layout:DEFAULT_PET_LAYOUT}];
   let activeSkinId=localStorage.getItem(SKIN_KEY)||'keeper';
   let bubbleContentHeightCache=BUBBLE_WINDOW.height-BUBBLE_BOTTOM_INSET;
@@ -130,25 +130,19 @@
     try{localStorage.setItem(BUBBLE_STYLE_KEY,next);}catch(_){}
   }
   function _applyPetSkin(skinId){
-    const next=petSkins.find(skin=>skin.id===skinId)||petSkins[0];
+    const requested=String(skinId||'').trim();
+    if(!requested) return;
+    activeSkinId=requested;
+    const next=petSkins.find(skin=>skin.id===requested)||petSkins[0];
     if(!next) return;
-    activeSkinId=next.id;
     const layout=_normalizeSkinLayout(next.layout);
     if(installSprite){installSprite.style.backgroundImage=`url("${next.spritesheetUrl}")`;installSprite.style.backgroundSize=`${layout.columns*100}% ${layout.rows*100}%`;}
-  }
-  function _healActiveSkin(){
-    if(petSkins.some(skin=>skin.id===activeSkinId)) return;
-    const fallback=petSkins.find(skin=>skin.id==='keeper')||petSkins[0];
-    if(!fallback) return;
-    activeSkinId=fallback.id;
-    try{localStorage.setItem(SKIN_KEY,activeSkinId);}catch(_){}
   }
   async function _loadPetSkins(){
     try{
       const data=await fetch('/api/pet/skins',{cache:'no-store'}).then(res=>{if(!res.ok) throw new Error(`Pet skins failed: ${res.status}`);return res.json();});
       const skins=(Array.isArray(data.skins)?data.skins:[]).map(_safeSkin).filter(Boolean);
       if(skins.length) petSkins=skins;
-      _healActiveSkin();
       _applyPetSkin(activeSkinId);
       return true;
     }catch(err){console.warn('Failed to load pet skins',err);_applyPetSkin(activeSkinId);return false;}
@@ -838,6 +832,13 @@
     const seq=++layoutSeq;
     const win=_currentTauriWindow();
     if(!win) return;
+    if(userHidden){
+      visibleMode='hidden';
+      bubbleWindowCache={mode:'hidden',logicalWidth:0,logicalHeight:0,x:0,y:0};
+      if(typeof win.hide==='function') await win.hide();
+      _requestPetRaise(false);
+      return;
+    }
     const mode=forcedMode||_bubbleMode();
     try{
       if(mode==='hidden'){
@@ -1061,6 +1062,16 @@
       });
     }catch(err){console.warn('Failed to listen for pet layout events',err);}
   }
+  async function _listenPetVisibilityChanges(){
+    const tauri=window.__TAURI__;
+    if(!tauri||!tauri.event||typeof tauri.event.listen!=='function') return;
+    try{await tauri.event.listen('pet-visibility-change',event=>{
+      const payload=event&&event.payload;
+      const visible=typeof payload==='boolean'?payload:(payload&&typeof payload.visible==='boolean'?payload.visible:!(payload&&payload.hidden===true));
+      userHidden=!visible;
+      _scheduleBubbleSync();
+    });}catch(err){console.warn('Failed to listen for pet visibility changes',err);}
+  }
   setInterval(refresh,POLL_MS);
   setInterval(()=>{
     const els=document.querySelectorAll('.pet-elapsed[data-started-at]');
@@ -1070,6 +1081,7 @@
     }
   },1000);
   async function _bootBubbles(){
+    await _listenPetVisibilityChanges();
     _localizeStaticLabels();
     await _listenPetWindowEvents();
     const skinStartup=_loadPetSkins();
