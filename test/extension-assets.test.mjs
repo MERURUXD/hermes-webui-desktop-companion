@@ -21,16 +21,17 @@ test('extension adapter JavaScript parses', () => {
   }
 });
 
-test('desktop pet body click opens the latest WebUI tab', async () => {
+test('desktop pet body click plays jump animation without opening browser', async () => {
   const petText = await readFile(new URL('../desktop-pet/web/pet.js', import.meta.url), 'utf8');
 
-  assert.match(petText, /function _openWebuiInBrowser\(/);
-  assert.match(petText, /\/api\/pet\/open_webui/);
+  assert.doesNotMatch(petText, /_openWebuiInBrowser/);
+  assert.doesNotMatch(petText, /\/api\/pet\/open_webui/);
   assert.match(petText, /function _onStageClick\(event\)/);
   assert.match(petText, /DRAG_CLICK_SUPPRESS_PX=4/);
   assert.match(petText, /function _consumeSuppressedStageClick\(event\)/);
   assert.match(petText, /if\(_consumeSuppressedStageClick\(event\)\) return;/);
-  assert.match(petText, /_openWebuiInBrowser\(\)/);
+  assert.match(petText, /_setState\('jumping'\)/);
+  assert.match(petText, /INTERACT_ANIM_HOLD_MS/);
   assert.match(petText, /stage\.addEventListener\('click',_onStageClick\)/);
 });
 

@@ -13,14 +13,14 @@
   const PET_DISPLAY_SCALE=2/3;
   const DRAG_CLICK_SUPPRESS_PX=4;
   const DRAG_CLICK_SUPPRESS_MS=450;
+  const DRAG_HEAD_RATIO=0.7;
   const PET_BADGE_FIXED={right:16,top:14,size:26,gap:-24,hitPad:8};
   let currentPetDisplaySize={width:128,height:139};
   let currentPetWindowSize={width:146,height:139};
   let petLayoutFrameId=0;
-  let dragLayoutTrackFrame=0;
-  let dragLayoutTrackUntil=0;
-  let dragLayoutTrackInFlight=false;
-  let dragLayoutTrackDirty=false;
+  let dragLayoutPoll=0;
+  let dragLastMoveAt=0;
+  let dragStartedAt=0;
   let latestPetMonitor=null;
   const DEFAULT_PET_LAYOUT={columns:8,rows:9,frameWidth:192,frameHeight:208,states:[{name:'idle',row:0,frames:6},{name:'running-right',row:1,frames:8},{name:'running-left',row:2,frames:8},{name:'waving',row:3,frames:4},{name:'jumping',row:4,frames:5},{name:'failed',row:5,frames:8},{name:'waiting',row:6,frames:6},{name:'running',row:7,frames:6},{name:'review',row:8,frames:6}]};
   const shell=document.getElementById('petShell');
@@ -33,7 +33,10 @@
   let lastSkinSelectionAt=0;
   let petPreferences={enabled:true,allow_direct_send:false,allow_inline_action_responses:false};
   let _isDragging=false;
-  let _dragPrevX=null;
+  let dragAnimUntil=0;
+  let dragLastScreenX=null;
+  let dragStartScreenX=null;
+  const INTERACT_ANIM_HOLD_MS=1500;
   let dragStartPoint=null;
   let suppressStageClickUntil=0;
 
@@ -80,13 +83,6 @@
     const data=await fetch('/api/pet/preference',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json',..._csrfHeaders()},body:JSON.stringify(patch||{})}).then(res=>{if(!res.ok) throw new Error(`Pet preference update failed: ${res.status}`);return res.json();});
     petPreferences=_normalizePreferences(data);
     return petPreferences;
-  }
-  async function _openWebuiInBrowser(){
-    try{
-      const res=await fetch('/api/pet/open_webui',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json',..._csrfHeaders()},body:'{}'});
-      if(!res.ok) throw new Error(`Pet WebUI open failed: ${res.status}`);
-      return await res.json();
-    }catch(err){console.warn('Failed to open WebUI from pet',err);return null;}
   }
 
   function _localizeStaticLabels(){
@@ -253,7 +249,10 @@
       badge.textContent=String(count);
       badge.setAttribute('aria-label',_petT('desktop_pet_expand_updates'));
     }
-    if(!_isDragging){_setState(items.some(item=>item.status==='action_required')?'waiting':(items.some(item=>item.status==='ready')?'waving':(items.some(item=>item.status==='running')?'running':'idle')));}
+    if(!_isDragging){
+      if(Date.now()<dragAnimUntil){/* 拖拽动画驻留中，跳过状态覆盖 */}
+      else{_setState(items.some(item=>item.status==='action_required')?'waiting':(items.some(item=>item.status==='running')?'running':(items.some(item=>item.status==='ready')?'waving':'idle')));}
+    }
     _emitPetAttentionUpdate(count,collapsed);
     _emitPetLayout().catch(()=>{});
   }
@@ -399,7 +398,6 @@
     const clamped=!dragging&&tauriGeo?await _clampPetWindowToMonitor(win,tauriGeo,_monitorUsable(monitor)?monitor:null):null;
     const nextGeo=dragging?tauriGeo:(clamped||tauriGeo||_browserWindowGeometry());
     if(!nextGeo) return;
-    if(dragging&&nextGeo){const dx=nextGeo.x;if(_dragPrevX!==null&&Math.abs(dx-_dragPrevX)>2){_setState(dx>_dragPrevX?'running-right':'running-left');}_dragPrevX=dx;}
     const badgeGeo=_badgeGeometryForPet(nextGeo);
     await tauri.event.emit('pet-layout-update',{pet:nextGeo,badge:badgeGeo,monitor:bounds,coordinateSpace:nextGeo.coordinateSpace||bounds.coordinateSpace||'physical',dragging});
   }
@@ -429,45 +427,44 @@
     return true;
   }
   function _startDragLayoutTracking(event){
-    _isDragging=true;_dragPrevX=null;
+    const now=Date.now();
+    _isDragging=true;dragLastScreenX=null;dragStartScreenX=null;dragLastMoveAt=now;dragStartedAt=now;
     dragStartPoint=_eventPoint(event);
-    dragLayoutTrackUntil=Date.now()+12000;
-    if(dragLayoutTrackFrame) return;
-    function _emitPetDragLayout(){
-      if(dragLayoutTrackInFlight){
-        dragLayoutTrackDirty=true;
-        return;
-      }
-      dragLayoutTrackInFlight=true;
-      _emitPetLayout({dragging:true}).catch(()=>{}).finally(()=>{
-        dragLayoutTrackInFlight=false;
-        if(dragLayoutTrackDirty&&Date.now()<=dragLayoutTrackUntil){
-          dragLayoutTrackDirty=false;
-          _emitPetDragLayout();
-        }else{
-          dragLayoutTrackDirty=false;
-        }
-      });
-    }
-    const tick=()=>{
-      dragLayoutTrackFrame=0;
-      if(Date.now()>dragLayoutTrackUntil) return;
-      _emitPetDragLayout();
-      dragLayoutTrackFrame=requestAnimationFrame(tick);
-    };
-    dragLayoutTrackFrame=requestAnimationFrame(tick);
+    const screenX=Number(window.screenX);
+    if(Number.isFinite(screenX)){dragLastScreenX=screenX;dragStartScreenX=screenX;}
+    if(!dragLayoutPoll) dragLayoutPoll=setInterval(_pollDragLayout,50);
   }
-  function _stopDragLayoutTracking(event){
-    const dragged=_isDragging&&_dragDistanceFromStart(event)>DRAG_CLICK_SUPPRESS_PX;
-    if(dragged) _suppressNextStageClick();
-    _isDragging=false;_dragPrevX=null;
-    dragStartPoint=null;
-    dragLayoutTrackUntil=0;
-    dragLayoutTrackDirty=false;
-    if(dragLayoutTrackFrame){
-      cancelAnimationFrame(dragLayoutTrackFrame);
-      dragLayoutTrackFrame=0;
+  function _pollDragLayout(){
+    if(!dragLayoutPoll) return;
+    const now=Date.now();
+    if(dragStartedAt&&now-dragStartedAt>=15000){
+      clearInterval(dragLayoutPoll);dragLayoutPoll=0;
+      _finishDragLayoutTracking();
+      return;
     }
+    const screenX=Number(window.screenX);
+    let moved=false;
+    if(Number.isFinite(screenX)){
+      if(dragLastScreenX!==null){
+        if(screenX>dragLastScreenX+2){if(!_isDragging) dragStartedAt=now;_isDragging=true;_setState('running-right');moved=true;}
+        else if(screenX<dragLastScreenX-2){if(!_isDragging) dragStartedAt=now;_isDragging=true;_setState('running-left');moved=true;}
+      }
+      dragLastScreenX=screenX;
+    }
+    if(moved) dragLastMoveAt=now;
+    else if(_isDragging&&now-dragLastMoveAt>=500) _finishDragLayoutTracking();
+    _emitPetLayout({dragging:_isDragging}).catch(()=>{});
+  }
+  function _finishDragLayoutTracking(event){
+    if(!_isDragging&&!dragLayoutPoll) return;
+    if(event){
+      const screenX=Number(window.screenX);
+      const dragged=_dragDistanceFromStart(event)||(Number.isFinite(screenX)&&Number.isFinite(dragStartScreenX)&&Math.abs(screenX-dragStartScreenX)>DRAG_CLICK_SUPPRESS_PX);
+      if(dragged) _suppressNextStageClick();
+    }
+    _isDragging=false;
+    dragAnimUntil=0;
+    dragStartPoint=null;dragStartScreenX=null;dragLastMoveAt=0;
     _emitPetLayoutBurst();
     render();
   }
@@ -487,6 +484,9 @@
   async function _startTauriWindowDrag(event,options={}){
     if(!event) return;
     if(_eventInsideBadge(event)) return;
+    const stageRect=stage.getBoundingClientRect();
+    const dragY=Number(event.clientY);
+    if(Number.isFinite(dragY)&&dragY>stageRect.top+stageRect.height*DRAG_HEAD_RATIO) return;
     if(event.type==='pointerdown'&&event.pointerType==='mouse') return;
     if('button' in event&&event.button!==0) return;
     const win=_currentTauriWindow();
@@ -494,7 +494,6 @@
     if(options.preventDefault===true&&typeof event.preventDefault==='function') event.preventDefault();
     _startDragLayoutTracking(event);
     try{await win.startDragging();}catch(_){}
-    _emitPetLayoutBurst();
   }
   function _onBadgeActivate(){
     const collapsed=localStorage.getItem(COLLAPSED_KEY)==='true';
@@ -521,12 +520,12 @@
       _onBadgeActivate();
       return;
     }
+    dragAnimUntil=Date.now()+INTERACT_ANIM_HOLD_MS;
     _setState('jumping');
-    _openWebuiInBrowser();
   }
   function _onStageKeyboardActivate(){
+    dragAnimUntil=Date.now()+INTERACT_ANIM_HOLD_MS;
     _setState('jumping');
-    _openWebuiInBrowser();
   }
   async function _openPetContextMenu(event){
     event.preventDefault();
@@ -588,9 +587,8 @@
   document.addEventListener('click',_onUnifiedBadgeClick,{capture:true});
   stage.addEventListener('mousedown',_startTauriWindowDrag,{capture:true});
   stage.addEventListener('pointerdown',_startTauriWindowDrag,{capture:true});
-  window.addEventListener('mouseup',_stopDragLayoutTracking,{capture:true});
-  window.addEventListener('pointerup',_stopDragLayoutTracking,{capture:true});
-  window.addEventListener('blur',_stopDragLayoutTracking);
+  ['mouseup','pointerup','blur'].forEach(type=>window.addEventListener(type,event=>_finishDragLayoutTracking(event),{capture:true}));
+
   stage.addEventListener('click',_onStageClick);
   stage.addEventListener('keydown',event=>_handleAccessibleKey(event,_onStageKeyboardActivate));
   window.addEventListener('storage',event=>{if(event.key===COLLAPSED_KEY||event.key===DISMISSED_KEY) render();});
