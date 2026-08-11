@@ -39,6 +39,9 @@
   const INTERACT_ANIM_HOLD_MS=1500;
   let dragStartPoint=null;
   let suppressStageClickUntil=0;
+  let celebrateUntil=0;
+  let wasReady=null;      // null=首帧未初始化（启动时不因既有 ready 触发庆祝）
+  let attentionBooted=false;  // refresh 首次成功后才允许边沿检测（防 storage 事件竞态提前置位）
 
   const I18N_FALLBACKS={
     desktop_pet_close:'Close pet',
@@ -224,13 +227,22 @@
     if(status==='ready') return `${sid}:ready:${Number(row&&row.message_count||0)}`;
     return `${sid}:${status}`;
   }
+  // Subagent sessions are excluded from pet-side attention (same predicate as
+  // bubbles.js): their ready/completed cards would otherwise pin wasReady=true
+  // and starve the completion-feedback edge trigger for real user sessions.
+  // The WebUI renders them with the fixed title "Subagent Session" and they are
+  // view-only (no rename entry point). If the WebUI ever changes that title,
+  // this predicate must be updated in sync.
+  function _isSubagentItem(item){
+    return String(item&&item.title||'').replace(/\s+/g,' ').trim()==='Subagent Session';
+  }
   function _attentionItems(){
     dismissed=_readJson(DISMISSED_KEY,{});
     return sessions.map(row=>{
       const status=String(row&&row.status||'idle');
       const dismissKey=_dismissKeyForRow(row,status);
       return {...row,status,dismissKey,text:_clean(row.process_text)};
-    }).filter(item=>item.status!=='idle'&&dismissed[item.dismissKey]!==true).sort((a,b)=>{
+    }).filter(item=>item.status!=='idle'&&dismissed[item.dismissKey]!==true&&!_isSubagentItem(item)).sort((a,b)=>{
       const priority={action_required:3,running:2,ready:1};
       if(a.status!==b.status) return (priority[b.status]||0)-(priority[a.status]||0);
       return Number(b.last_message_at||0)-Number(a.last_message_at||0);
@@ -250,8 +262,22 @@
       badge.setAttribute('aria-label',_petT('desktop_pet_expand_updates'));
     }
     if(!_isDragging){
+      const hasAction=items.some(item=>item.status==='action_required');
+      const hasRunning=items.some(item=>item.status==='running');
+      const hasReady=items.some(item=>item.status==='ready');
+      // ready 边沿检测：attention 就绪后、ready 从无到有且无更高优先级状态 → 触发一次完成反馈（review）
+      if(!attentionBooted||wasReady===null){wasReady=hasReady;}
+      else if(hasReady&&!wasReady&&!hasAction&&!hasRunning){
+        const layout=_activeLayout();
+        const spec=layout.states.find(s=>s.name==='review');
+        const frames=Math.max(1,Math.min(layout.columns,Number(spec&&spec.frames)||layout.columns));
+        celebrateUntil=Date.now()+frames*FRAME_MS;   // 动态：播满一轮 review（keeper 6 帧×520ms≈3.1s）
+        wasReady=true;
+      }
+      else{wasReady=hasReady;}
       if(Date.now()<dragAnimUntil){/* 拖拽动画驻留中，跳过状态覆盖 */}
-      else{_setState(items.some(item=>item.status==='action_required')?'waiting':(items.some(item=>item.status==='running')?'running':(items.some(item=>item.status==='ready')?'waving':'idle')));}
+      else if(Date.now()<celebrateUntil){_setState('review');}   // 完成反馈驻留
+      else{_setState(hasAction?'waiting':(hasRunning?'running':(hasReady?'waving':'idle')));}
     }
     _emitPetAttentionUpdate(count,collapsed);
     _emitPetLayout().catch(()=>{});
@@ -260,6 +286,7 @@
     try{
       const data=await fetch('/api/pet/attention'+_attentionQuery(),{cache:'no-store'}).then(res=>{if(!res.ok) throw new Error(`Pet attention failed: ${res.status}`);return res.json();});
       sessions=Array.isArray(data.sessions)?data.sessions:[];
+      if(!attentionBooted){attentionBooted=true;wasReady=null;}   // 首帧竞态保护：首次 refresh 前不触发庆祝；重置 wasReady 基线，防 boot 前 storage 事件（空 sessions render）污染基线导致启动误播（审阅低危 1 修正）
       render();
       return true;
     }catch(_){return false;}
