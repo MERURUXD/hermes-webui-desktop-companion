@@ -44,11 +44,11 @@ body{position:relative;outline:0;box-shadow:none;}
 .pet-welcome{pointer-events:auto;}
 .pet-bubbles{position:absolute;left:10px;right:10px;bottom:0;overflow:visible;z-index:3;pointer-events:auto;}
 .pet-bubbles[hidden]{display:none!important;}
-.pet-viewport{max-height:var(--pet-viewport-max,236px);padding:0 8px;margin:0 -8px;overflow-x:hidden;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:none;}
+.pet-viewport{max-height:var(--pet-viewport-max,358px);padding:0 8px;margin:0 -8px;overflow-x:hidden;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:none;}
 .pet-viewport::-webkit-scrollbar{display:none;}
 .pet-bubbles.has-overflow::after{content:"";position:absolute;left:2px;right:2px;bottom:0;height:8px;pointer-events:none;background:linear-gradient(to bottom,rgba(241,243,250,0),var(--pet-scrim));border-radius:0 0 22px 22px;}
 .pet-bubbles.has-hidden-above::before{content:"";position:absolute;left:2px;right:2px;top:0;height:8px;pointer-events:none;background:linear-gradient(to top,rgba(241,243,250,0),var(--pet-scrim));border-radius:22px 22px 0 0;z-index:2;}
-.pet-list{display:flex;flex-direction:column;gap:7px;}
+.pet-list{display:flex;flex-direction:column;gap:7px;padding-bottom:8px;}
 .pet-card{position:relative;box-sizing:border-box;width:100%;min-height:0;padding:8px 10px 9px 36px;border:var(--pet-border-width) solid var(--pet-border);border-radius:18px;background-color:var(--pet-bubble);background-image:var(--pet-glass-sheen,none);background-repeat:no-repeat;color:var(--pet-text);box-shadow:inset 0 1px 0 var(--pet-highlight),var(--pet-shadow);cursor:pointer;overflow:hidden;-webkit-backdrop-filter:blur(var(--pet-card-blur,0px)) saturate(var(--pet-card-saturate,1)) brightness(var(--pet-card-brightness,1));backdrop-filter:blur(var(--pet-card-blur,0px)) saturate(var(--pet-card-saturate,1)) brightness(var(--pet-card-brightness,1));}
 .pet-card-main,.pet-card-title,.pet-card-text,.pet-card-status,.pet-ready,.pet-action-required,.pet-spinner{cursor:pointer;}
 .pet-card:focus-visible{outline:2px solid #8b5cf6;outline-offset:3px;}

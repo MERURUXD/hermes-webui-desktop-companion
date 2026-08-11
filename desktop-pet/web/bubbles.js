@@ -16,7 +16,7 @@
   const BUBBLE_SIDE_INSET=10;
   const BUBBLE_GAP=8;
   const BUBBLE_BOTTOM_INSET=0;
-  const BUBBLE_MAX_VISIBLE_CARDS=2.7;
+  const BUBBLE_MAX_VISIBLE_CARDS=4.5;
   const BUBBLE_MIN_HEIGHT=76;
   const PET_RAISE_REQUESTED_EVENT='pet-raise-requested';
   const PET_PERMISSION_TOGGLE_EVENT='pet-permission-toggle';
@@ -313,6 +313,14 @@
     if(!raw) return _petT('desktop_pet_action_required');
     return `${_petT('desktop_pet_action_required')}: ${raw}`;
   }
+  // Subagent sessions are hidden from bubble cards: the WebUI renders them
+  // with the fixed title "Subagent Session" and they are view-only (no rename
+  // entry point), so the title is the only reliable signal here (the attention
+  // payload carries no source field). If the WebUI ever changes that title,
+  // this predicate must be updated in sync.
+  function _isSubagentItem(item){
+    return String(item&&item.title||'').replace(/\s+/g,' ').trim()==='Subagent Session';
+  }
   function _attentionItems(){
     dismissed=_readJson(DISMISSED_KEY,{});
     const items=sessions.map(row=>{
@@ -322,7 +330,7 @@
       const text=status==='ready'?_readyMetaText(row):(status==='action_required'?_actionRequiredText(row,actionType):(_clean(row.process_text)||_petT('desktop_pet_thinking')));
       const tooltip=status==='ready'?(_clean(row.process_text)||text):(status==='action_required'?(_clean(row.process_text)||text):text);
       return {...row,status,dismissKey,actionType,text,tooltip,action_required_command:_clean(row.action_required_command),action_required_description:_clean(row.action_required_description),action_required_approval_id:_clean(row.action_required_approval_id),action_required_choices:Array.isArray(row.action_required_choices)?row.action_required_choices:[],action_required_clarify_id:_clean(row.action_required_clarify_id)};
-    }).filter(item=>item.status!=='idle'&&dismissed[item.dismissKey]!==true).sort((a,b)=>{
+    }).filter(item=>item.status!=='idle'&&dismissed[item.dismissKey]!==true&&!_isSubagentItem(item)).sort((a,b)=>{
       const priority={action_required:3,running:2,ready:1};
       if(a.status!==b.status) return (priority[b.status]||0)-(priority[a.status]||0);
       return Number(b.last_message_at||0)-Number(a.last_message_at||0);
@@ -673,7 +681,7 @@
     const cards=Array.from(list.querySelectorAll('.pet-card'));
     if(!cards.length){_setViewportMax(0);return 0;}
     const gap=parseFloat(getComputedStyle(list).gap||'0')||0;
-    // Reference a collapsed card for the normal "2.7 visible cards" cap so an
+    // Reference a collapsed card for the normal "4.5 visible cards" cap so an
     // expanded card sitting first in the list does not inflate the budget.
     const collapsed=cards.find(card=>card.dataset.expanded!=='1');
     const collapsedRef=(collapsed?collapsed.getBoundingClientRect().height:0)||74;
