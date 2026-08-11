@@ -10,7 +10,7 @@ use std::process::{Child, Command};
 use std::sync::{atomic::AtomicBool, atomic::Ordering, Arc, Mutex};
 use std::thread;
 use std::time::Duration;
-use tauri::menu::{MenuBuilder, SubmenuBuilder};
+use tauri::menu::{CheckMenuItemBuilder, MenuBuilder, SubmenuBuilder};
 use tauri::tray::TrayIconBuilder;
 use tauri::{Emitter, Listener, Manager, Url, WebviewWindow};
 
@@ -35,6 +35,36 @@ const BUBBLE_STYLE_PREFIX: &str = "bubblestyle:";
 const PET_BUBBLE_STYLE_CHANGE_EVENT: &str = "pet-bubble-style-change";
 
 const LOOPBACK_ADDR: &str = "127.0.0.1:17787";
+const TRAY_AOT_ID: &str = "tray_always_on_top";
+
+fn config_path() -> PathBuf {
+    if let Some(app_data) = std::env::var_os("APPDATA") { PathBuf::from(app_data).join("HermesDesktopCompanion").join("config.json") }
+    else if let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) { PathBuf::from(home).join(".hermes-desktop-companion-config.json") }
+    else { PathBuf::from("config.json") }
+}
+fn load_always_on_top() -> bool {
+    let Ok(contents) = fs::read_to_string(config_path()) else { return true; };
+    match serde_json::from_str::<serde_json::Value>(&contents) {
+        Ok(value) => value.get("always_on_top").and_then(|x| x.as_bool()).unwrap_or(true),
+        Err(err) => { eprintln!("failed to parse config.json, defaulting always_on_top=true: {err}"); true }
+    }
+}
+fn save_always_on_top(enabled: bool) {
+    let path = config_path();
+    let mut config = fs::read_to_string(&path).ok().and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok()).unwrap_or_else(|| serde_json::json!({}));
+    if let Some(obj) = config.as_object_mut() { obj.insert("always_on_top".into(), serde_json::Value::Bool(enabled)); }
+    if let Some(parent) = path.parent() {
+        if let Err(err) = fs::create_dir_all(parent) { eprintln!("failed to create config dir: {err}"); return; }
+    }
+    let tmp = path.with_extension("json.tmp");
+    if let Err(err) = fs::write(&tmp, serde_json::to_string_pretty(&config).unwrap_or_default()) {
+        eprintln!("failed to write config: {err}");
+        return;
+    }
+    if let Err(err) = fs::rename(&tmp, &path) {
+        eprintln!("failed to rename config into place: {err}");
+    }
+}
 
 #[cfg(target_os = "windows")]
 struct SingleInstanceMutex(HANDLE);
@@ -60,6 +90,8 @@ fn acquire_single_instance() -> Option<SingleInstanceMutex> {
     }
     Some(SingleInstanceMutex(mutex))
 }
+
+struct AlwaysOnTopFlag(Arc<AtomicBool>);
 
 struct Sidecar {
     child: Mutex<Option<Child>>,
@@ -503,17 +535,18 @@ fn attach_bubble_child_window(pet_window: &WebviewWindow, bubble_window: &Webvie
 fn attach_bubble_child_window(_pet_window: &WebviewWindow, _bubble_window: &WebviewWindow) {}
 
 fn restore_pet_window_layers(app: &tauri::AppHandle) {
+    let aot = app.state::<AlwaysOnTopFlag>().0.load(Ordering::SeqCst);
     if let Some(pet_window) = app.get_webview_window("pet") {
         let _ = pet_window.set_ignore_cursor_events(false);
         set_native_ignore_cursor_events(&pet_window, false);
-        let _ = pet_window.set_always_on_top(false);
-        let _ = pet_window.set_always_on_top(true);
+        if aot { let _ = pet_window.set_always_on_top(false); }
+        let _ = pet_window.set_always_on_top(aot);
         set_pet_window_level(&pet_window);
         install_first_click_handler(&pet_window);
     }
     if let Some(bubble_window) = app.get_webview_window("pet_bubbles") {
-        let _ = bubble_window.set_always_on_top(false);
-        let _ = bubble_window.set_always_on_top(true);
+        if aot { let _ = bubble_window.set_always_on_top(false); }
+        let _ = bubble_window.set_always_on_top(aot);
         set_bubble_window_level(&bubble_window);
         install_first_click_handler(&bubble_window);
     }
@@ -652,6 +685,7 @@ fn apply_bubble_visibility(
     visible: bool,
     focus: bool,
 ) {
+    let aot = app.state::<AlwaysOnTopFlag>().0.load(Ordering::SeqCst);
     if let Ok(mut state) = visible_state.lock() {
         *state = visible;
     }
@@ -661,7 +695,7 @@ fn apply_bubble_visibility(
     let _ = bubble_window.set_ignore_cursor_events(!visible);
     set_native_ignore_cursor_events(&bubble_window, !visible);
     if visible {
-        let _ = bubble_window.set_always_on_top(true);
+        let _ = bubble_window.set_always_on_top(aot);
         set_bubble_window_level(&bubble_window);
         install_first_click_handler(&bubble_window);
         let _ = bubble_window.show();
@@ -699,9 +733,12 @@ const TRAY_TOGGLE_ID: &str = "tray_toggle_pet";
 const TRAY_OPEN_WEBUI_ID: &str = "tray_open_webui";
 const TRAY_QUIT_ID: &str = "tray_quit";
 
-fn build_tray(app: &tauri::AppHandle, user_hidden: Arc<AtomicBool>) -> Result<(), tauri::Error> {
+fn build_tray(app: &tauri::AppHandle, user_hidden: Arc<AtomicBool>, always_on_top: Arc<AtomicBool>) -> Result<(), tauri::Error> {
+    let aot_item = CheckMenuItemBuilder::with_id(TRAY_AOT_ID, "Always on top").checked(always_on_top.load(Ordering::SeqCst)).build(app)?;
+    let aot_item_for_event = aot_item.clone();
     let menu = MenuBuilder::new(app)
         .text(TRAY_TOGGLE_ID, "Show/Hide pet")
+        .item(&aot_item)
         .text(TRAY_OPEN_WEBUI_ID, "Open WebUI")
         .separator()
         .text(TRAY_QUIT_ID, "Quit")
@@ -740,6 +777,7 @@ fn build_tray(app: &tauri::AppHandle, user_hidden: Arc<AtomicBool>) -> Result<()
                     }
                 });
             }
+            TRAY_AOT_ID => { let next = !always_on_top.load(Ordering::SeqCst); always_on_top.store(next, Ordering::SeqCst); let _ = aot_item_for_event.set_checked(next); let handle = app.clone(); let _ = handle.clone().run_on_main_thread(move || { for label in ["pet", "pet_bubbles"] { if let Some(window) = handle.get_webview_window(label) { let _ = window.set_always_on_top(next); } } }); save_always_on_top(next); }
             TRAY_OPEN_WEBUI_ID => open_external_url(&remote_webui_url()),
             TRAY_QUIT_ID => app.exit(0),
             _ => {}
@@ -805,25 +843,29 @@ fn main() {
     let user_hidden = Arc::new(AtomicBool::new(false));
     let user_hidden_for_setup = user_hidden.clone();
     let user_hidden_for_tray = user_hidden.clone();
+    let always_on_top = Arc::new(AtomicBool::new(load_always_on_top()));
+    let always_on_top_for_setup = always_on_top.clone();
+    let always_on_top_for_tray = always_on_top.clone();
     tauri::Builder::default()
         .setup(move |app| {
             let sidecar = Sidecar::start().map_err(|error| error.to_string())?;
             app.manage(sidecar);
-            build_tray(app.handle(), user_hidden_for_tray.clone())?;
+            app.manage(AlwaysOnTopFlag(always_on_top_for_setup.clone()));
+            build_tray(app.handle(), user_hidden_for_tray.clone(), always_on_top_for_tray)?;
 
             navigate_window_to_webui(app, "pet", "/pet");
             navigate_window_to_webui(app, "pet_bubbles", "/pet/bubbles");
             if let Some(pet_window) = app.get_webview_window("pet") {
                 let _ = pet_window.set_ignore_cursor_events(false);
                 set_native_ignore_cursor_events(&pet_window, false);
-                let _ = pet_window.set_always_on_top(true);
+                let _ = pet_window.set_always_on_top(app.state::<AlwaysOnTopFlag>().0.load(Ordering::SeqCst));
                 set_pet_window_level(&pet_window);
                 install_first_click_handler(&pet_window);
             }
             if let Some(bubble_window) = app.get_webview_window("pet_bubbles") {
                 let _ = bubble_window.set_ignore_cursor_events(true);
                 set_native_ignore_cursor_events(&bubble_window, true);
-                let _ = bubble_window.set_always_on_top(true);
+                let _ = bubble_window.set_always_on_top(app.state::<AlwaysOnTopFlag>().0.load(Ordering::SeqCst));
                 set_bubble_window_level(&bubble_window);
                 install_first_click_handler(&bubble_window);
             }
