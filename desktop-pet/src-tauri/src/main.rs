@@ -35,6 +35,7 @@ const BUBBLE_STYLE_PREFIX: &str = "bubblestyle:";
 const PET_BUBBLE_STYLE_CHANGE_EVENT: &str = "pet-bubble-style-change";
 const PET_SIZE_PREFIX: &str = "petsize:";
 const PET_SIZE_CHANGE_EVENT: &str = "pet-size-change";
+const PET_SCALE_REQUEST_EVENT: &str = "pet-scale-request";
 const PET_SIZE_OPTIONS: [u16; 6] = [50, 75, 100, 125, 150, 200];
 
 const LOOPBACK_ADDR: &str = "127.0.0.1:17787";
@@ -426,6 +427,16 @@ fn emit_pet_visibility(app: &tauri::AppHandle, visible: bool) {
         for label in ["pet", "pet_bubbles"] {
             let _ = retry_app.emit_to(label, PET_VISIBILITY_CHANGE_EVENT, visible);
         }
+    });
+}
+
+fn emit_pet_scale(app: &tauri::AppHandle, scale: u16) {
+    let payload = scale.to_string();
+    let _ = app.emit_to("pet", PET_SIZE_CHANGE_EVENT, &payload);
+    let retry_app = app.clone();
+    thread::spawn(move || {
+        thread::sleep(Duration::from_millis(600));
+        let _ = retry_app.emit_to("pet", PET_SIZE_CHANGE_EVENT, &payload);
     });
 }
 
@@ -894,6 +905,15 @@ fn main() {
 
             navigate_window_to_webui(app, "pet", "/pet");
             navigate_window_to_webui(app, "pet_bubbles", "/pet/bubbles");
+            emit_pet_scale(
+                app.handle(),
+                pet_scale_for_setup.load(Ordering::SeqCst),
+            );
+            let scale_reply_handle = app.handle().clone();
+            app.listen(PET_SCALE_REQUEST_EVENT, move |_| {
+                let scale = scale_reply_handle.state::<PetScaleFlag>().0.load(Ordering::SeqCst);
+                emit_pet_scale(&scale_reply_handle, scale);
+            });
             if let Some(pet_window) = app.get_webview_window("pet") {
                 let _ = pet_window.set_ignore_cursor_events(false);
                 set_native_ignore_cursor_events(&pet_window, false);

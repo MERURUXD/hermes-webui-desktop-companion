@@ -652,6 +652,10 @@
     await refresh();
     _listenPetSkinChanges();
     _listenPetSizeChanges();
+    const tauri=window.__TAURI__;
+    if(tauri&&tauri.event&&typeof tauri.event.emit==='function'){
+      tauri.event.emit('pet-scale-request',{}).catch(()=>{});
+    }
     let initialBubbleStyle='default';
     try{initialBubbleStyle=localStorage.getItem(BUBBLE_STYLE_KEY)||'default';}catch(_){}
     _applyBubbleStyle(initialBubbleStyle);
