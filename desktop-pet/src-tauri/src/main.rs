@@ -7,7 +7,7 @@ use std::net::TcpStream;
 use std::fs;
 use std::path::PathBuf;
 use std::process::{Child, Command};
-use std::sync::{atomic::AtomicBool, atomic::Ordering, Arc, Mutex};
+use std::sync::{atomic::AtomicBool, atomic::AtomicU16, atomic::Ordering, Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 use tauri::menu::{CheckMenuItemBuilder, MenuBuilder, SubmenuBuilder};
@@ -33,6 +33,9 @@ const SKIN_MENU_PREFIX: &str = "skin:";
 const PERMISSION_MENU_PREFIX: &str = "permission:";
 const BUBBLE_STYLE_PREFIX: &str = "bubblestyle:";
 const PET_BUBBLE_STYLE_CHANGE_EVENT: &str = "pet-bubble-style-change";
+const PET_SIZE_PREFIX: &str = "petsize:";
+const PET_SIZE_CHANGE_EVENT: &str = "pet-size-change";
+const PET_SIZE_OPTIONS: [u16; 6] = [50, 75, 100, 125, 150, 200];
 
 const LOOPBACK_ADDR: &str = "127.0.0.1:17787";
 const TRAY_AOT_ID: &str = "tray_always_on_top";
@@ -53,6 +56,37 @@ fn save_always_on_top(enabled: bool) {
     let path = config_path();
     let mut config = fs::read_to_string(&path).ok().and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok()).unwrap_or_else(|| serde_json::json!({}));
     if let Some(obj) = config.as_object_mut() { obj.insert("always_on_top".into(), serde_json::Value::Bool(enabled)); }
+    if let Some(parent) = path.parent() {
+        if let Err(err) = fs::create_dir_all(parent) { eprintln!("failed to create config dir: {err}"); return; }
+    }
+    let tmp = path.with_extension("json.tmp");
+    if let Err(err) = fs::write(&tmp, serde_json::to_string_pretty(&config).unwrap_or_default()) {
+        eprintln!("failed to write config: {err}");
+        return;
+    }
+    if let Err(err) = fs::rename(&tmp, &path) {
+        eprintln!("failed to rename config into place: {err}");
+    }
+}
+fn load_pet_scale() -> u16 {
+    let Ok(contents) = fs::read_to_string(config_path()) else { return 100; };
+    match serde_json::from_str::<serde_json::Value>(&contents) {
+        Ok(value) => value
+            .get("pet_scale")
+            .and_then(|x| x.as_u64())
+            .and_then(|x| u16::try_from(x).ok())
+            .filter(|scale| PET_SIZE_OPTIONS.contains(scale))
+            .unwrap_or(100),
+        Err(err) => {
+            eprintln!("failed to parse config.json, defaulting pet_scale=100: {err}");
+            100
+        }
+    }
+}
+fn save_pet_scale(scale: u16) {
+    let path = config_path();
+    let mut config = fs::read_to_string(&path).ok().and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok()).unwrap_or_else(|| serde_json::json!({}));
+    if let Some(obj) = config.as_object_mut() { obj.insert("pet_scale".into(), serde_json::Value::Number(scale.into())); }
     if let Some(parent) = path.parent() {
         if let Err(err) = fs::create_dir_all(parent) { eprintln!("failed to create config dir: {err}"); return; }
     }
@@ -92,6 +126,8 @@ fn acquire_single_instance() -> Option<SingleInstanceMutex> {
 }
 
 struct AlwaysOnTopFlag(Arc<AtomicBool>);
+
+struct PetScaleFlag(Arc<AtomicU16>);
 
 struct Sidecar {
     child: Mutex<Option<Child>>,
@@ -846,11 +882,14 @@ fn main() {
     let always_on_top = Arc::new(AtomicBool::new(load_always_on_top()));
     let always_on_top_for_setup = always_on_top.clone();
     let always_on_top_for_tray = always_on_top.clone();
+    let pet_scale = Arc::new(AtomicU16::new(load_pet_scale()));
+    let pet_scale_for_setup = pet_scale.clone();
     tauri::Builder::default()
         .setup(move |app| {
             let sidecar = Sidecar::start().map_err(|error| error.to_string())?;
             app.manage(sidecar);
             app.manage(AlwaysOnTopFlag(always_on_top_for_setup.clone()));
+            app.manage(PetScaleFlag(pet_scale_for_setup.clone()));
             build_tray(app.handle(), user_hidden_for_tray.clone(), always_on_top_for_tray)?;
 
             navigate_window_to_webui(app, "pet", "/pet");
@@ -974,6 +1013,19 @@ fn main() {
                     let Ok(skin_menu) = skin_builder.build() else {
                         return;
                     };
+                    let mut size_builder = SubmenuBuilder::new(&menu_handle, "Size");
+                    let current_scale = menu_handle.state::<PetScaleFlag>().0.load(Ordering::SeqCst);
+                    for opt in PET_SIZE_OPTIONS {
+                        let label = if opt == current_scale {
+                            format!("{opt}% ✓")
+                        } else {
+                            format!("{opt}%")
+                        };
+                        size_builder = size_builder.text(format!("{PET_SIZE_PREFIX}{opt}"), label);
+                    }
+                    let Ok(size_menu) = size_builder.build() else {
+                        return;
+                    };
                     let active_bubble_style = payload
                         .active_bubble_style
                         .as_deref()
@@ -1044,6 +1096,7 @@ fn main() {
                     let Ok(menu) = MenuBuilder::new(&menu_handle)
                         .item(&skin_menu)
                         .item(&style_menu)
+                        .item(&size_menu)
                         .text(MANAGE_PETS_MENU_ID, "Manage pets...")
                         .separator()
                         .item(&permission_menu)
@@ -1077,6 +1130,17 @@ fn main() {
                     restore_pet_window_layers(&app.clone());
                     let _ = app.emit_to("pet", PET_BUBBLE_STYLE_CHANGE_EVENT, style.to_string());
                     let _ = app.emit_to("pet_bubbles", PET_BUBBLE_STYLE_CHANGE_EVENT, style.to_string());
+                }
+                return;
+            }
+            if let Some(scale_str) = id.strip_prefix(PET_SIZE_PREFIX) {
+                if let Ok(scale) = scale_str.parse::<u16>() {
+                    if PET_SIZE_OPTIONS.contains(&scale) {
+                        app.state::<PetScaleFlag>().0.store(scale, Ordering::SeqCst);
+                        save_pet_scale(scale);
+                        let _ = app.emit_to("pet", PET_SIZE_CHANGE_EVENT, scale_str.to_string());
+                        restore_pet_window_layers(&app.clone());
+                    }
                 }
                 return;
             }

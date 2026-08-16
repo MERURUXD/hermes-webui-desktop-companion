@@ -5,6 +5,8 @@
   const SESSION_VIEWED_COUNTS_KEY='hermes-session-viewed-counts';
   const SESSION_COMPLETION_UNREAD_KEY='hermes-session-completion-unread';
   const SKIN_KEY='hermes-pet-skin';
+  const PET_SIZE_KEY='hermes-pet-size';
+  const PET_SIZE_CHANGE_EVENT='pet-size-change';
   const RESTART_POSITION_KEY='hermes-pet-restart-position';
   const PET_NATIVE_RESTART_REQUESTED_EVENT='pet-native-restart-requested';
   const PET_PERMISSION_TOGGLE_EVENT='pet-permission-toggle';
@@ -17,6 +19,8 @@
   const PET_BADGE_FIXED={right:16,top:14,size:26,gap:-24,hitPad:8};
   let currentPetDisplaySize={width:128,height:139};
   let currentPetWindowSize={width:146,height:139};
+  let currentPetScale=(()=>{const n=Number(localStorage.getItem(PET_SIZE_KEY));return Number.isFinite(n)&&n>=50&&n<=200?Math.round(n):100;})();
+  let pendingPetSize=null;
   let petLayoutFrameId=0;
   let dragLayoutPoll=0;
   let dragLastMoveAt=0;
@@ -112,8 +116,8 @@
   }
   function _activeSkin(){return petSkins.find(skin=>skin.id===activeSkinId)||petSkins[0];}
   function _activeLayout(){const skin=_activeSkin();return _normalizeSkinLayout(skin&&skin.layout);}
-  function _displaySizeForLayout(layout){const safe=_normalizeSkinLayout(layout);return {width:Math.max(1,Math.round(safe.frameWidth*PET_DISPLAY_SCALE)),height:Math.max(1,Math.round(safe.frameHeight*PET_DISPLAY_SCALE))};}
-  function _windowSizeForDisplaySize(display){return {width:display.width+PET_BADGE_FIXED.gap+PET_BADGE_FIXED.size+PET_BADGE_FIXED.right,height:display.height};}
+  function _displaySizeForLayout(layout){const safe=_normalizeSkinLayout(layout);return {width:Math.max(1,Math.round(safe.frameWidth*PET_DISPLAY_SCALE*currentPetScale/100)),height:Math.max(1,Math.round(safe.frameHeight*PET_DISPLAY_SCALE*currentPetScale/100))};}
+  function _windowSizeForDisplaySize(display){const s=currentPetScale/100;return {width:display.width+Math.round((PET_BADGE_FIXED.gap+PET_BADGE_FIXED.size+PET_BADGE_FIXED.right)*s),height:display.height};}
   function _logicalSize(width,height){const Ctor=_tauriDpiCtor('LogicalSize');return Ctor?new Ctor(width,height):null;}
   function _applyPetDisplaySize(layout){
     currentPetDisplaySize=_displaySizeForLayout(layout);
@@ -122,11 +126,16 @@
     document.documentElement.style.setProperty('--pet-height',`${currentPetDisplaySize.height}px`);
     document.documentElement.style.setProperty('--pet-window-width',`${currentPetWindowSize.width}px`);
     document.documentElement.style.setProperty('--pet-window-height',`${currentPetWindowSize.height}px`);
-    document.documentElement.style.setProperty('--pet-badge-gap',`${PET_BADGE_FIXED.gap}px`);
-    document.documentElement.style.setProperty('--pet-badge-right',`${PET_BADGE_FIXED.right}px`);
-    document.documentElement.style.setProperty('--pet-badge-top',`${PET_BADGE_FIXED.top}px`);
-    document.documentElement.style.setProperty('--pet-badge-size',`${PET_BADGE_FIXED.size}px`);
-    document.documentElement.style.setProperty('--pet-badge-hit-pad',`${PET_BADGE_FIXED.hitPad}px`);
+    const s=currentPetScale/100;
+    document.documentElement.style.setProperty('--pet-badge-gap',`${PET_BADGE_FIXED.gap*s}px`);
+    document.documentElement.style.setProperty('--pet-badge-right',`${PET_BADGE_FIXED.right*s}px`);
+    document.documentElement.style.setProperty('--pet-badge-top',`${PET_BADGE_FIXED.top*s}px`);
+    document.documentElement.style.setProperty('--pet-badge-size',`${PET_BADGE_FIXED.size*s}px`);
+    document.documentElement.style.setProperty('--pet-badge-hit-pad',`${PET_BADGE_FIXED.hitPad*s}px`);
+    sprite.style.width=`${currentPetDisplaySize.width}px`;
+    sprite.style.height=`${currentPetDisplaySize.height}px`;
+    stage.style.width=`${currentPetDisplaySize.width}px`;
+    stage.style.height=`${currentPetDisplaySize.height}px`;
     const win=_currentTauriWindow();
     const logical=_logicalSize(currentPetWindowSize.width,currentPetWindowSize.height);
     if(win&&logical&&typeof win.setSize==='function') win.setSize(logical).then(()=>_emitPetLayout()).catch(err=>console.warn('Failed to resize pet window',err));
@@ -151,10 +160,6 @@
     _applyPetDisplaySize(layout);
     sprite.style.backgroundImage=`url("${next.spritesheetUrl}")`;
     sprite.style.backgroundSize=`${layout.columns*100}% ${layout.rows*100}%`;
-    sprite.style.width=`${currentPetDisplaySize.width}px`;
-    sprite.style.height=`${currentPetDisplaySize.height}px`;
-    stage.style.width=`${currentPetDisplaySize.width}px`;
-    stage.style.height=`${currentPetDisplaySize.height}px`;
     stage.setAttribute('aria-label',next.displayName);
     shell.setAttribute('aria-label',_petT('desktop_pet_shell_label',next.displayName));
   }
@@ -171,6 +176,20 @@
     const tauri=window.__TAURI__;
     if(!tauri||!tauri.event||typeof tauri.event.listen!=='function') return;
     try{await tauri.event.listen('pet-skin-change',event=>_applyPetSkin(String(event.payload||''),true));}catch(err){console.warn('Failed to listen for pet skin changes',err);}
+  }
+  async function _listenPetSizeChanges(){
+    const tauri=window.__TAURI__;
+    if(!tauri||!tauri.event||typeof tauri.event.listen!=='function') return;
+    try{await tauri.event.listen(PET_SIZE_CHANGE_EVENT,event=>_applyPetSize(String(event.payload||'')));}catch(err){console.warn('Failed to listen for pet size changes',err);}
+  }
+  function _applyPetSize(percent){
+    const p=Math.round(Number(percent));
+    if(!Number.isFinite(p)) return;
+    const next=Math.min(200,Math.max(50,p));
+    currentPetScale=next;
+    try{localStorage.setItem(PET_SIZE_KEY,String(next));}catch(_){}
+    if(_isDragging){pendingPetSize=next;return;}
+    _applyPetDisplaySize(_activeLayout());
   }
   async function _listenBubbleStyleChanges(){
     const tauri=window.__TAURI__;
@@ -402,13 +421,14 @@
   }
   function _badgeGeometryForPet(pet){
     if(!pet||!pet.width||!pet.height) return null;
+    const s=currentPetScale/100;
     const scaleX=pet.width/currentPetWindowSize.width;
     const scaleY=pet.height/currentPetWindowSize.height;
-    const width=PET_BADGE_FIXED.size*scaleX;
-    const height=PET_BADGE_FIXED.size*scaleY;
+    const width=PET_BADGE_FIXED.size*s*scaleX;
+    const height=PET_BADGE_FIXED.size*s*scaleY;
     return {
-      x:pet.x+(currentPetDisplaySize.width+PET_BADGE_FIXED.gap)*scaleX,
-      y:pet.y+PET_BADGE_FIXED.top*scaleY,
+      x:pet.x+(currentPetDisplaySize.width+PET_BADGE_FIXED.gap*s)*scaleX,
+      y:pet.y+PET_BADGE_FIXED.top*s*scaleY,
       width,
       height
     };
@@ -490,6 +510,7 @@
       if(dragged) _suppressNextStageClick();
     }
     _isDragging=false;
+    if(pendingPetSize){_applyPetSize(pendingPetSize);pendingPetSize=null;}
     dragAnimUntil=0;
     dragStartPoint=null;dragStartScreenX=null;dragLastMoveAt=0;
     _emitPetLayoutBurst();
@@ -630,6 +651,7 @@
     await _loadPetSkins();
     await refresh();
     _listenPetSkinChanges();
+    _listenPetSizeChanges();
     let initialBubbleStyle='default';
     try{initialBubbleStyle=localStorage.getItem(BUBBLE_STYLE_KEY)||'default';}catch(_){}
     _applyBubbleStyle(initialBubbleStyle);

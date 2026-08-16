@@ -614,6 +614,7 @@ test('desktop pet keeps the migrated PR2916 bubble window choreography', async (
   assert.match(petText, /celebrateUntil|wasReady|attentionBooted|_isSubagentItem/);
   assert.match(cssText, /pet-text-shimmer/);
   assert.match(cssText, /--pet-shimmer-highlight/);
+  assert.match(petText, /PET_SIZE_KEY|pet-size-change|_applyPetSize/);
   assert.match(bubblesText, /BUBBLE_MAX_VISIBLE_CARDS=4\.5/);
   assert.match(bubblesText, /function _bubblePosition\(/);
   assert.match(bubblesText, /function _syncBubbleWindow\(/);
