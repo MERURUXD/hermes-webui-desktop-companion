@@ -14,3 +14,6 @@ desktop-pet/src-tauri/gen/
 *.user
 *.suo
 *.log
+
+# Local-only project memory (never pushed)
+.hermes.md
