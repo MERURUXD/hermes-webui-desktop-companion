@@ -10,7 +10,7 @@
   const WELCOME_SECONDS=30;
   const WELCOME_IDLE_GRACE_MS=2600;
   const POLL_MS=1000;
-  const BUBBLE_WINDOW={width:320,height:300};
+  const BUBBLE_WINDOW={width:384,height:300};
   const INSTALL_WINDOW={width:320,height:300};
   const TOAST_WINDOW={width:320,height:92};
   const BUBBLE_SIDE_INSET=10;
