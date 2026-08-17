@@ -24,7 +24,7 @@
         "alwaysOnTop": true,
         "skipTaskbar": true,
         "devtools": false,
-        "visible": true
+        "visible": false
       },
       {
         "label": "pet_bubbles",

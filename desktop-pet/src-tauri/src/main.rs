@@ -954,6 +954,26 @@ fn main() {
             app.manage(PetScaleFlag(pet_scale_for_setup.clone()));
             build_tray(app.handle(), user_hidden_for_tray.clone(), always_on_top_for_tray)?;
 
+            // Initialize pet/bubbles BEFORE navigation and re-assert
+            // skip_taskbar on each window so the config-driven creation
+            // transient never surfaces the pet on the Windows taskbar.
+            if let Some(pet_window) = app.get_webview_window("pet") {
+                let _ = pet_window.set_skip_taskbar(true);
+                let _ = pet_window.set_ignore_cursor_events(false);
+                set_native_ignore_cursor_events(&pet_window, false);
+                let _ = pet_window.set_always_on_top(app.state::<AlwaysOnTopFlag>().0.load(Ordering::SeqCst));
+                set_pet_window_level(&pet_window);
+                install_first_click_handler(&pet_window);
+            }
+            if let Some(bubble_window) = app.get_webview_window("pet_bubbles") {
+                let _ = bubble_window.set_skip_taskbar(true);
+                let _ = bubble_window.set_ignore_cursor_events(true);
+                set_native_ignore_cursor_events(&bubble_window, true);
+                let _ = bubble_window.set_always_on_top(app.state::<AlwaysOnTopFlag>().0.load(Ordering::SeqCst));
+                set_bubble_window_level(&bubble_window);
+                install_first_click_handler(&bubble_window);
+            }
+
             navigate_window_to_webui(app, "pet", "/pet");
             navigate_window_to_webui(app, "pet_bubbles", "/pet/bubbles");
             emit_pet_scale(
@@ -965,25 +985,16 @@ fn main() {
                 let scale = scale_reply_handle.state::<PetScaleFlag>().0.load(Ordering::SeqCst);
                 emit_pet_scale(&scale_reply_handle, scale);
             });
-            if let Some(pet_window) = app.get_webview_window("pet") {
-                let _ = pet_window.set_ignore_cursor_events(false);
-                set_native_ignore_cursor_events(&pet_window, false);
-                let _ = pet_window.set_always_on_top(app.state::<AlwaysOnTopFlag>().0.load(Ordering::SeqCst));
-                set_pet_window_level(&pet_window);
-                install_first_click_handler(&pet_window);
-            }
-            if let Some(bubble_window) = app.get_webview_window("pet_bubbles") {
-                let _ = bubble_window.set_ignore_cursor_events(true);
-                set_native_ignore_cursor_events(&bubble_window, true);
-                let _ = bubble_window.set_always_on_top(app.state::<AlwaysOnTopFlag>().0.load(Ordering::SeqCst));
-                set_bubble_window_level(&bubble_window);
-                install_first_click_handler(&bubble_window);
-            }
             if let (Some(pet_window), Some(bubble_window)) = (
                 app.get_webview_window("pet"),
                 app.get_webview_window("pet_bubbles"),
             ) {
                 attach_bubble_child_window(&pet_window, &bubble_window);
+            }
+            // Show the pet window only after its navigation request is issued.
+            // bubbles stays hidden — it is surfaced later by attention.
+            if let Some(pet_window) = app.get_webview_window("pet") {
+                let _ = pet_window.show();
             }
             restore_pet_window_layers_during_startup(app.handle().clone());
             let raise_handle = app.handle().clone();

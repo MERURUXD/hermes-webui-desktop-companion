@@ -655,6 +655,40 @@ test('desktop pet keeps the migrated PR2916 bubble window choreography', async (
   assert.match(tauriMainText, /api\.prevent_close\(\)/);
   assert.match(tauriMainText, /window\.hide\(\)/);
   assert.match(tauriMainText, /matches!\(window\.label\(\),\s*"pet"\s*\|\s*"pet_bubbles"\)/);
+
+  // Regression: Windows startup taskbar transient. The pet window must be
+  // created hidden (visible=false) so the brief config-driven creation flash
+  // never reaches the taskbar; skipTaskbar stays true for both windows; and
+  // the setup path re-asserts skip_taskbar before navigating, then shows pet
+  // only after navigation completes.
+  const tauriConfText = await readFile(new URL('../desktop-pet/src-tauri/tauri.conf.json', import.meta.url), 'utf8');
+  const tauriConf = JSON.parse(tauriConfText);
+  const petWindowConf = tauriConf.app.windows.find((w) => w.label === 'pet');
+  const bubblesWindowConf = tauriConf.app.windows.find((w) => w.label === 'pet_bubbles');
+  assert.equal(petWindowConf.visible, false, 'pet window must start hidden to avoid taskbar transient');
+  assert.equal(petWindowConf.skipTaskbar, true, 'pet window must keep skipTaskbar=true');
+  assert.equal(bubblesWindowConf.visible, false, 'bubbles window must stay hidden');
+  assert.equal(bubblesWindowConf.skipTaskbar, true, 'bubbles window must keep skipTaskbar=true');
+
+  // At least two explicit runtime re-assertions of skip_taskbar (one per
+  // window) — guards against the config flag being silently dropped by wry.
+  const skipTaskbarCallCount = (tauriMainText.match(/set_skip_taskbar\(true\)/g) || []).length;
+  assert.ok(skipTaskbarCallCount >= 2, `expected at least two set_skip_taskbar(true) calls, found ${skipTaskbarCallCount}`);
+
+  // The setup path must re-assert skip_taskbar on the pet window BEFORE
+  // navigate_window_to_webui(app, "pet", ...) runs, so the taskbar cannot
+  // transiently surface the pet during the navigation window.
+  const petNavigateIdx = tauriMainText.indexOf('navigate_window_to_webui(app, "pet"');
+  const petSkipIdx = tauriMainText.indexOf('pet_window.set_skip_taskbar(true)');
+  assert.ok(petNavigateIdx > -1, 'setup must call navigate_window_to_webui(app, "pet", ...)');
+  assert.ok(petSkipIdx > -1, 'setup must re-assert pet_window.set_skip_taskbar(true)');
+  assert.ok(petSkipIdx < petNavigateIdx, 'pet set_skip_taskbar(true) must come before navigate_window_to_webui(app, "pet", ...)');
+
+  // The pet window must be shown only AFTER navigation, never before, so the
+  // first paint happens against the correct URL and not the placeholder.
+  const petShowIdx = tauriMainText.indexOf('pet_window.show()');
+  assert.ok(petShowIdx > -1, 'setup must explicitly show pet_window after navigation');
+  assert.ok(petShowIdx > petNavigateIdx, 'pet_window.show() must come after navigate_window_to_webui(app, "pet", ...)');
 });
 
 test('extension manifest bundles adapter assets', async () => {
