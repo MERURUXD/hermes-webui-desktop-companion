@@ -3,7 +3,7 @@ import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promi
 import os from 'node:os';
 import path from 'node:path';
 import { after, before, test } from 'node:test';
-import { createServer, normalizePort } from '../src/loopback-server.mjs';
+import { createServer, extractSessionCookie, normalizePort } from '../src/loopback-server.mjs';
 
 let server;
 let baseUrl;
@@ -34,7 +34,7 @@ function fakePngHeader(width, height) {
 }
 
 before(async () => {
-  server = createServer({ allowedOrigins: 'http://127.0.0.1:8787', preferencePath: null });
+  server = createServer({ allowedOrigins: 'http://127.0.0.1:8787', preferencePath: null, attentionMode: 'adapter' });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const address = server.address();
   baseUrl = `http://${address.address}:${address.port}`;
@@ -221,7 +221,7 @@ test('pet attention expires stale WebUI snapshots', async () => {
 });
 
 test('pet open_session queues browser navigation command', async () => {
-  const server = createServer({ preferencePath: null, focusExistingBrowserTab: false, openExternal: () => true });
+  const server = createServer({ attentionMode: 'adapter', preferencePath: null, focusExistingBrowserTab: false, openExternal: () => true });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const address = server.address();
   const base = `http://${address.address}:${address.port}`;
@@ -269,6 +269,7 @@ test('pet open_session queues browser navigation command', async () => {
 test('pet open_webui focuses the latest WebUI browser tab', async () => {
   const focusCalls = [];
   const server = createServer({
+    attentionMode: 'adapter',
     preferencePath: null,
     focusExistingBrowserTab: (url, origin) => {
       focusCalls.push({ url, origin });
@@ -331,6 +332,7 @@ test('macOS Chrome tab focus does not reload an already focused target URL', asy
 test('pet open_webui falls back to the configured WebUI base without a snapshot', async () => {
   const focusCalls = [];
   const server = createServer({
+    attentionMode: 'adapter',
     preferencePath: null,
     webuiBaseUrl: 'http://127.0.0.1:8788/',
     focusExistingBrowserTab: (url, origin) => {
@@ -371,6 +373,7 @@ test('pet open_webui falls back to the configured WebUI base without a snapshot'
 
 test('pet commands accept short Hermes session ids', async () => {
   const server = createServer({
+    attentionMode: 'adapter',
     preferencePath: null,
     initialPreferences: { allow_inline_action_responses: true },
     focusExistingBrowserTab: false,
@@ -424,6 +427,7 @@ test('pet commands accept short Hermes session ids', async () => {
 test('pet open_session focuses an existing WebUI browser tab', async () => {
   const focusCalls = [];
   const server = createServer({
+    attentionMode: 'adapter',
     preferencePath: null,
     focusExistingBrowserTab: (url, origin) => {
       focusCalls.push({ url, origin });
@@ -471,6 +475,7 @@ test('pet open_session focuses an existing WebUI browser tab', async () => {
 
 test('pet open_session waits for bridge ack when sending a quick reply draft', async () => {
   const server = createServer({
+    attentionMode: 'adapter',
     preferencePath: null,
     initialPreferences: { allow_direct_send: true },
     focusExistingBrowserTab: () => ({ focused: true, reused: true }),
@@ -523,6 +528,7 @@ test('pet open_session waits for bridge ack when sending a quick reply draft', a
 
 test('pet open_session downgrades autosend when direct send is disabled', async () => {
   const server = createServer({
+    attentionMode: 'adapter',
     preferencePath: null,
     focusExistingBrowserTab: () => ({ focused: true, reused: true }),
     openExternal: () => {
@@ -1150,7 +1156,710 @@ test('invalid JSON is rejected', async () => {
   assert.equal(response.status, 400);
 });
 
+// --- Server-attention mode: the sidecar pulls directly from the remote
+// WebUI instead of the adapter snapshot channel. Tests drive the poll loop
+// deterministically via server.tickServerAttention() with mocked
+// loginWebui/webuiFetch — no real network or timers involved.
+
+async function startAttentionServer(overrides = {}) {
+  const server = createServer({
+    attentionMode: 'server',
+    attentionAutoStart: false,
+    webuiRemoteBase: 'https://hermes.meruru.ccwu.cc',
+    webuiPassword: 'test-password',
+    preferencePath: null,
+    focusExistingBrowserTab: false,
+    openExternal: () => true,
+    ...overrides
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  return server;
+}
+
+async function closeAttentionServer(server) {
+  if (server) server.stopServerAttention();
+  await new Promise((resolve, reject) => {
+    server.close((error) => (error ? reject(error) : resolve()));
+  });
+}
+
+test('server attention mode logs in, polls the remote WebUI, and serves attention', async () => {
+  const loginCalls = [];
+  const fetchPaths = [];
+  const server = await startAttentionServer({
+    loginWebui: async () => {
+      loginCalls.push(1);
+      return { ok: true, cookieHeader: 'hermes_session=token.sig' };
+    },
+    webuiFetch: async (path) => {
+      fetchPaths.push(path);
+      if (path === '/api/sessions') {
+        return {
+          status: 200,
+          ok: true,
+          data: { sessions: [{ session_id: 'srv-run', title: 'Remote task', is_streaming: true, message_count: 2, updated_at: 200, last_message_at: 200 }] }
+        };
+      }
+      return { status: 404, ok: false, data: null };
+    }
+  });
+  try {
+    const address = server.address();
+    const base = `http://${address.address}:${address.port}`;
+    await server.tickServerAttention();
+
+    const attention = await fetch(`${base}/api/pet/attention`);
+    const body = await attention.json();
+    assert.equal(attention.status, 200);
+    assert.equal(body.source, 'server-poll');
+    assert.equal(body.sessions.length, 1);
+    assert.equal(body.sessions[0].session_id, 'srv-run');
+    assert.equal(body.sessions[0].status, 'running');
+    assert.equal(body.sessions[0].title, 'Remote task');
+
+    const connection = await fetch(`${base}/api/pet/connection`);
+    const connBody = await connection.json();
+    assert.equal(connection.status, 200);
+    assert.deepEqual({ mode: connBody.mode, state: connBody.state }, { mode: 'server', state: 'online' });
+    assert.ok(fetchPaths.includes('/api/sessions'));
+    assert.equal(loginCalls.length, 1);
+  } finally {
+    await closeAttentionServer(server);
+  }
+});
+
+test('server attention mode marks sessions ready after a running to idle transition', async () => {
+  let running = true;
+  const sid = 'srv-transition';
+  const server = await startAttentionServer({
+    loginWebui: async () => ({ ok: true, cookieHeader: 'hermes_session=token.sig' }),
+    webuiFetch: async (path) => {
+      if (path === '/api/sessions') {
+        const sessions = running
+          ? [{ session_id: sid, title: 'Transition task', is_streaming: true, message_count: 1, updated_at: 500 }]
+          : [{ session_id: sid, title: 'Transition task', message_count: 2, updated_at: 900, last_message_at: 900 }];
+        return { status: 200, ok: true, data: { sessions } };
+      }
+      return { status: 404, ok: false, data: null };
+    }
+  });
+  try {
+    const address = server.address();
+    const base = `http://${address.address}:${address.port}`;
+    await server.tickServerAttention();
+    let body = await (await fetch(`${base}/api/pet/attention`)).json();
+    assert.equal(body.sessions.length, 1);
+    assert.equal(body.sessions[0].status, 'running');
+
+    running = false;
+    await server.tickServerAttention();
+    body = await (await fetch(`${base}/api/pet/attention`)).json();
+    assert.equal(body.sessions.length, 1);
+    assert.equal(body.sessions[0].status, 'ready');
+  } finally {
+    await closeAttentionServer(server);
+  }
+});
+
+test('server attention mode surfaces action_required from the session attention field', async () => {
+  const server = await startAttentionServer({
+    loginWebui: async () => ({ ok: true, cookieHeader: 'hermes_session=token.sig' }),
+    webuiFetch: async (path) => {
+      if (path === '/api/sessions') {
+        return {
+          status: 200,
+          ok: true,
+          data: { sessions: [{
+            session_id: 'srv-act',
+            title: 'Needs approval',
+            attention: { status: 'action_required', kind: 'approval', approval_id: 'ap-1', description: 'Approve network call' },
+            message_count: 3,
+            updated_at: 700
+          }] }
+        };
+      }
+      if (path.startsWith('/api/approval/pending')) {
+        return {
+          status: 200,
+          ok: true,
+          data: { pending: { kind: 'approval', approval_id: 'ap-1', description: 'Approve network call' }, pending_count: 1 }
+        };
+      }
+      return { status: 404, ok: false, data: null };
+    }
+  });
+  try {
+    const address = server.address();
+    const base = `http://${address.address}:${address.port}`;
+    await server.tickServerAttention();
+    const body = await (await fetch(`${base}/api/pet/attention`)).json();
+    assert.equal(body.sessions.length, 1);
+    assert.equal(body.sessions[0].status, 'action_required');
+    assert.equal(body.sessions[0].action_required_type, 'approval');
+    assert.equal(body.sessions[0].action_required_approval_id, 'ap-1');
+    assert.equal(body.sessions[0].action_required_choices.length, 0);
+  } finally {
+    await closeAttentionServer(server);
+  }
+});
+
+test('server attention mode goes offline after 3 network failures and recovers', async () => {
+  let failMode = 'network';
+  const server = await startAttentionServer({
+    loginWebui: async () => ({ ok: true, cookieHeader: 'hermes_session=token.sig' }),
+    webuiFetch: async (path) => {
+      if (failMode === 'network') throw new Error('network unreachable');
+      if (failMode === 'auth') return { status: 401, ok: false, data: null };
+      if (path === '/api/sessions') return { status: 200, ok: true, data: { sessions: [] } };
+      return { status: 404, ok: false, data: null };
+    }
+  });
+  try {
+    const address = server.address();
+    const base = `http://${address.address}:${address.port}`;
+    const state = async () => (await (await fetch(`${base}/api/pet/connection`)).json()).state;
+
+    // Failures 1-2 keep the state online; the 3rd consecutive failure flips
+    // to offline (the VPS-grade "~9s" worst case at the 2.5s poll interval).
+    await server.tickServerAttention();
+    await server.tickServerAttention();
+    assert.equal(await state(), 'online');
+    await server.tickServerAttention();
+    assert.equal(await state(), 'offline');
+
+    // A successful tick resets the counter and returns to online.
+    failMode = 'ok';
+    await server.tickServerAttention();
+    assert.equal(await state(), 'online');
+  } finally {
+    await closeAttentionServer(server);
+  }
+});
+
+test('server attention mode enters auth_error with a 30s backoff on 401', async () => {
+  let loginCalls = 0;
+  let fetchCalls = 0;
+  const server = await startAttentionServer({
+    loginWebui: async () => {
+      loginCalls += 1;
+      return { ok: true, cookieHeader: 'hermes_session=token.sig' };
+    },
+    webuiFetch: async () => {
+      fetchCalls += 1;
+      return { status: 401, ok: false, data: null };
+    }
+  });
+  try {
+    const address = server.address();
+    const base = `http://${address.address}:${address.port}`;
+    await server.tickServerAttention();
+    let conn = await (await fetch(`${base}/api/pet/connection`)).json();
+    assert.equal(conn.state, 'auth_error');
+    assert.equal(fetchCalls, 1);
+
+    // Backoff: consecutive ticks must not re-login or re-fetch until the
+    // 30s window expires.
+    await server.tickServerAttention();
+    assert.equal(loginCalls, 1);
+    assert.equal(fetchCalls, 1);
+    conn = await (await fetch(`${base}/api/pet/connection`)).json();
+    assert.equal(conn.state, 'auth_error');
+  } finally {
+    await closeAttentionServer(server);
+  }
+});
+
+test('server attention mode enters auth_error with a 30s backoff on 429 (throttled)', async () => {
+  let loginCalls = 0;
+  let fetchCalls = 0;
+  const server = await startAttentionServer({
+    loginWebui: async () => {
+      loginCalls += 1;
+      return { ok: true, cookieHeader: 'hermes_session=token.sig' };
+    },
+    webuiFetch: async () => {
+      fetchCalls += 1;
+      return { status: 429, ok: false, data: null };
+    }
+  });
+  try {
+    const address = server.address();
+    const base = `http://${address.address}:${address.port}`;
+    await server.tickServerAttention();
+    let conn = await (await fetch(`${base}/api/pet/connection`)).json();
+    assert.equal(conn.state, 'auth_error');
+    assert.equal(fetchCalls, 1);
+
+    // Backoff: consecutive ticks must not re-login or re-fetch until the
+    // 30s window expires.
+    await server.tickServerAttention();
+    assert.equal(loginCalls, 1);
+    assert.equal(fetchCalls, 1);
+    conn = await (await fetch(`${base}/api/pet/connection`)).json();
+    assert.equal(conn.state, 'auth_error');
+  } finally {
+    await closeAttentionServer(server);
+  }
+});
+
+test('extractSessionCookie parses hermes_session from getSetCookie(), tolerating dotted values and extra cookies', () => {
+  const fakeResponse = {
+    headers: {
+      getSetCookie: () => [
+        'other=ignored; Path=/',
+        'hermes_session=abc123.def456; Path=/; HttpOnly; SameSite=Lax',
+        'third=value; Path=/'
+      ]
+    }
+  };
+  const fakeLegacyResponse = {
+    headers: {
+      get: (key) => (key === 'set-cookie' ? 'hermes_session=legacy.token; Path=/' : null)
+    }
+  };
+  assert.equal(extractSessionCookie(fakeResponse, 'hermes_session'), 'abc123.def456');
+  assert.equal(extractSessionCookie(fakeResponse, 'missing'), '');
+  assert.equal(extractSessionCookie(fakeLegacyResponse, 'hermes_session'), 'legacy.token');
+});
+
+test('server attention mode backs off after a failed password login', async () => {
+  let loginCalls = 0;
+  const server = await startAttentionServer({
+    loginWebui: async () => {
+      loginCalls += 1;
+      return { ok: false, reason: 'auth' };
+    },
+    webuiFetch: async () => {
+      throw new Error('must not be called');
+    }
+  });
+  try {
+    const address = server.address();
+    const base = `http://${address.address}:${address.port}`;
+    await server.tickServerAttention();
+    let conn = await (await fetch(`${base}/api/pet/connection`)).json();
+    assert.equal(conn.state, 'auth_error');
+
+    await server.tickServerAttention();
+    assert.equal(loginCalls, 1);
+    conn = await (await fetch(`${base}/api/pet/connection`)).json();
+    assert.equal(conn.state, 'auth_error');
+  } finally {
+    await closeAttentionServer(server);
+  }
+});
+
+test('server attention mode consumes viewed_counts and completion_unread from the pet query', async () => {
+  const sessions = [{ session_id: 'srv-done', title: 'Done', message_count: 5, updated_at: 1000, last_message_at: 1000 }];
+  const server = await startAttentionServer({
+    loginWebui: async () => ({ ok: true, cookieHeader: 'hermes_session=token.sig' }),
+    webuiFetch: async (path) => {
+      if (path === '/api/sessions') return { status: 200, ok: true, data: { sessions } };
+      return { status: 404, ok: false, data: null };
+    }
+  });
+  try {
+    const address = server.address();
+    const base = `http://${address.address}:${address.port}`;
+    const unread = { 'srv-done': { completed_at: Date.now() - 1000, message_count: 5 } };
+    const query = `viewed_counts=${encodeURIComponent('{}')}&completion_unread=${encodeURIComponent(JSON.stringify(unread))}`;
+    await fetch(`${base}/api/pet/attention?${query}`);
+
+    await server.tickServerAttention();
+    const body = await (await fetch(`${base}/api/pet/attention`)).json();
+    assert.equal(body.sessions.length, 1);
+    assert.equal(body.sessions[0].session_id, 'srv-done');
+    assert.equal(body.sessions[0].status, 'ready');
+  } finally {
+    await closeAttentionServer(server);
+  }
+});
+
+test('server attention mode ignores adapter snapshots but rejects invalid JSON', async () => {
+  const server = await startAttentionServer({
+    loginWebui: async () => ({ ok: true, cookieHeader: 'hermes_session=token.sig' }),
+    webuiFetch: async () => ({ status: 200, ok: true, data: { sessions: [] } })
+  });
+  try {
+    const address = server.address();
+    const base = `http://${address.address}:${address.port}`;
+    await server.tickServerAttention();
+
+    const valid = await fetch(`${base}/api/webui/snapshot`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ source: 'hermes-webui', companion: { attention: [{ session_id: 'x', status: 'running' }] } })
+    });
+    assert.equal(valid.status, 200);
+
+    // The adapter snapshot must NOT be served back in server mode: the poll
+    // loop owns latestSnapshot (a poll snapshot, not the adapter one).
+    const get = await fetch(`${base}/api/webui/snapshot`);
+    const getBody = await get.json();
+    assert.equal(getBody.snapshot && getBody.snapshot.reason, 'poll');
+    assert.deepEqual(getBody.snapshot.companion.attention, []);
+
+    const invalid = await fetch(`${base}/api/webui/snapshot`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{'
+    });
+    assert.equal(invalid.status, 400);
+  } finally {
+    await closeAttentionServer(server);
+  }
+});
+
+test('server attention mode falls back to the remote base for pet session navigation', async () => {
+  const server = await startAttentionServer({
+    loginWebui: async () => ({ ok: true, cookieHeader: 'hermes_session=token.sig' }),
+    webuiFetch: async () => ({ status: 200, ok: true, data: { sessions: [] } })
+  });
+  try {
+    const address = server.address();
+    const base = `http://${address.address}:${address.port}`;
+    await server.tickServerAttention();
+    const open = await fetch(`${base}/api/pet/open_session`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ session_id: 'abc123' })
+    });
+    const body = await open.json();
+    assert.equal(open.status, 200);
+    assert.equal(body.ok, true);
+    assert.equal(body.url, 'https://hermes.meruru.ccwu.cc/session/abc123');
+  } finally {
+    await closeAttentionServer(server);
+  }
+});
+
+test('server attention mode without a remote base falls back to adapter without polling', async () => {
+  let loginCalls = 0;
+  const server = await startAttentionServer({
+    webuiRemoteBase: '',
+    loginWebui: async () => {
+      loginCalls += 1;
+      return { ok: true, cookieHeader: 'hermes_session=token.sig' };
+    },
+    webuiFetch: async () => {
+      throw new Error('must not be called');
+    }
+  });
+  try {
+    const address = server.address();
+    const base = `http://${address.address}:${address.port}`;
+    await server.tickServerAttention();
+    const conn = await (await fetch(`${base}/api/pet/connection`)).json();
+    assert.equal(conn.mode, 'adapter');
+    assert.equal(conn.state, 'adapter');
+    assert.equal(loginCalls, 0);
+  } finally {
+    await closeAttentionServer(server);
+  }
+});
+
+test('server attention mode without a password falls back to adapter mode', async () => {
+  let loginCalls = 0;
+  const server = await startAttentionServer({
+    webuiPassword: '',
+    loginWebui: async () => {
+      loginCalls += 1;
+      return { ok: true, cookieHeader: 'hermes_session=token.sig' };
+    }
+  });
+  try {
+    const address = server.address();
+    const base = `http://${address.address}:${address.port}`;
+    await server.tickServerAttention();
+    const conn = await (await fetch(`${base}/api/pet/connection`)).json();
+    assert.deepEqual({ mode: conn.mode, state: conn.state }, { mode: 'adapter', state: 'adapter' });
+    assert.equal(loginCalls, 0);
+  } finally {
+    await closeAttentionServer(server);
+  }
+});
 test('normalizes configured ports', () => {
   assert.equal(normalizePort('17787'), 17787);
   assert.throws(() => normalizePort('99999'), /Invalid port/);
+});
+
+// --- server-attention action path (approval/clarify direct VPS call) ---
+// These exercise handleQueuedPetAction in server mode: the sidecar calls the
+// VPS API directly via webuiPost instead of queuing for the adapter bridge.
+
+test('server attention mode forwards approval.respond to the VPS and passes the response through', async () => {
+  const postCalls = [];
+  const server = await startAttentionServer({
+    initialPreferences: { allow_inline_action_responses: true },
+    loginWebui: async () => ({ ok: true, cookieHeader: 'hermes_session=token.sig' }),
+    webuiPost: async (path, body) => {
+      postCalls.push({ path, body });
+      return { ok: true, status: 200, json: { ok: true, approval_id: 'ap-1', resolved: true }, needRelogin: false };
+    }
+  });
+  try {
+    const address = server.address();
+    const base = `http://${address.address}:${address.port}`;
+    const response = await fetch(`${base}/api/approval/respond`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ session_id: 'abc123', choice: 'once', approval_id: 'ap-1' })
+    });
+    const body = await response.json();
+    assert.equal(response.status, 200);
+    assert.equal(body.ok, true);
+    assert.equal(body.server_executed, true);
+    assert.equal(body.resolved, true);
+    assert.equal(body.approval_id, 'ap-1');
+    assert.equal(postCalls.length, 1);
+    assert.equal(postCalls[0].path, '/api/approval/respond');
+    assert.equal(postCalls[0].body.choice, 'once');
+    assert.equal(postCalls[0].body.approval_id, 'ap-1');
+  } finally {
+    await closeAttentionServer(server);
+  }
+});
+
+test('server attention mode forwards clarify.respond to the VPS clarify endpoint', async () => {
+  const postCalls = [];
+  const server = await startAttentionServer({
+    initialPreferences: { allow_inline_action_responses: true },
+    loginWebui: async () => ({ ok: true, cookieHeader: 'hermes_session=token.sig' }),
+    webuiPost: async (path, body) => {
+      postCalls.push({ path, body });
+      return { ok: true, status: 200, json: { ok: true, clarify_id: 'cl-1' }, needRelogin: false };
+    }
+  });
+  try {
+    const address = server.address();
+    const base = `http://${address.address}:${address.port}`;
+    const response = await fetch(`${base}/api/clarify/respond`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ session_id: 'abc123', response: 'Use option A', clarify_id: 'cl-1' })
+    });
+    const body = await response.json();
+    assert.equal(response.status, 200);
+    assert.equal(body.ok, true);
+    assert.equal(body.server_executed, true);
+    assert.equal(postCalls.length, 1);
+    assert.equal(postCalls[0].path, '/api/clarify/respond');
+    assert.equal(postCalls[0].body.response, 'Use option A');
+  } finally {
+    await closeAttentionServer(server);
+  }
+});
+
+test('server attention mode rejects approval/clarify with 403 when the inline switch is off', async () => {
+  const server = await startAttentionServer({
+    initialPreferences: { allow_inline_action_responses: false },
+    loginWebui: async () => ({ ok: true, cookieHeader: 'hermes_session=token.sig' }),
+    webuiPost: async () => { throw new Error('webuiPost must not be called when the switch is off'); }
+  });
+  try {
+    const address = server.address();
+    const base = `http://${address.address}:${address.port}`;
+    const approval = await fetch(`${base}/api/approval/respond`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ session_id: 'abc123', choice: 'once', approval_id: 'ap-1' })
+    });
+    assert.equal(approval.status, 403);
+    assert.equal((await approval.json()).error, 'inline_action_responses_disabled');
+
+    const clarify = await fetch(`${base}/api/clarify/respond`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ session_id: 'abc123', response: 'A', clarify_id: 'cl-1' })
+    });
+    assert.equal(clarify.status, 403);
+    assert.equal((await clarify.json()).error, 'inline_action_responses_disabled');
+  } finally {
+    await closeAttentionServer(server);
+  }
+});
+
+test('server attention mode re-logins and retries once on a 401 from the VPS', async () => {
+  let postCalls = 0;
+  let loginCalls = 0;
+  const server = await startAttentionServer({
+    initialPreferences: { allow_inline_action_responses: true },
+    loginWebui: async () => {
+      loginCalls += 1;
+      return { ok: true, cookieHeader: 'hermes_session=token.sig' };
+    },
+    webuiPost: async () => {
+      postCalls += 1;
+      // First call: 401 (cookie expired). Second call (after re-login): 200.
+      if (postCalls === 1) return { ok: false, status: 401, json: { ok: false, error: 'unauthorized' }, needRelogin: true };
+      return { ok: true, status: 200, json: { ok: true, resolved: true }, needRelogin: false };
+    }
+  });
+  try {
+    const address = server.address();
+    const base = `http://${address.address}:${address.port}`;
+    const response = await fetch(`${base}/api/approval/respond`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ session_id: 'abc123', choice: 'once', approval_id: 'ap-1' })
+    });
+    const body = await response.json();
+    assert.equal(response.status, 200);
+    assert.equal(body.ok, true);
+    assert.equal(body.server_executed, true);
+    assert.equal(body.resolved, true);
+    assert.equal(postCalls, 2);
+    assert.equal(loginCalls, 1);
+  } finally {
+    await closeAttentionServer(server);
+  }
+});
+
+test('server attention mode passes a VPS 400 through without wrapping it as 502', async () => {
+  const server = await startAttentionServer({
+    initialPreferences: { allow_inline_action_responses: true },
+    loginWebui: async () => ({ ok: true, cookieHeader: 'hermes_session=token.sig' }),
+    webuiPost: async () => ({
+      ok: false,
+      status: 400,
+      json: { ok: false, error: 'invalid_choice', choices: ['once', 'always'] },
+      needRelogin: false
+    })
+  });
+  try {
+    const address = server.address();
+    const base = `http://${address.address}:${address.port}`;
+    const response = await fetch(`${base}/api/approval/respond`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ session_id: 'abc123', choice: 'bogus', approval_id: 'ap-1' })
+    });
+    const body = await response.json();
+    assert.equal(response.status, 400);
+    assert.equal(body.ok, false);
+    assert.equal(body.server_executed, true);
+    assert.equal(body.error, 'invalid_choice');
+    assert.deepEqual(body.choices, ['once', 'always']);
+  } finally {
+    await closeAttentionServer(server);
+  }
+});
+
+test('server attention mode returns 502 on a network failure reaching the VPS', async () => {
+  const server = await startAttentionServer({
+    initialPreferences: { allow_inline_action_responses: true },
+    loginWebui: async () => ({ ok: true, cookieHeader: 'hermes_session=token.sig' }),
+    webuiPost: async () => { throw new Error('network unreachable'); }
+  });
+  try {
+    const address = server.address();
+    const base = `http://${address.address}:${address.port}`;
+    const response = await fetch(`${base}/api/approval/respond`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ session_id: 'abc123', choice: 'once', approval_id: 'ap-1' })
+    });
+    const body = await response.json();
+    assert.equal(response.status, 502);
+    assert.equal(body.ok, false);
+    assert.equal(body.server_executed, true);
+    assert.equal(body.error, 'webui_action_network');
+  } finally {
+    await closeAttentionServer(server);
+  }
+});
+
+test('server attention mode open_session opens the browser and returns opened=true without waiting for ack', async () => {
+  const server = await startAttentionServer({
+    initialPreferences: { allow_inline_action_responses: true, allow_direct_send: true },
+    loginWebui: async () => ({ ok: true, cookieHeader: 'hermes_session=token.sig' }),
+    webuiFetch: async () => ({ status: 200, ok: true, data: { sessions: [] } }),
+    openExternal: (url) => { server.__openedUrl = url; return true; }
+  });
+  try {
+    const address = server.address();
+    const base = `http://${address.address}:${address.port}`;
+    await server.tickServerAttention();
+    // A draft + autosend payload: in server mode these are silently dropped
+    // (P2-1); the browser still opens to the session URL and no ack is waited.
+    const open = await fetch(`${base}/api/pet/open_session`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ session_id: 'abc123', draft: 'hello', autosend: true })
+    });
+    const body = await open.json();
+    assert.equal(open.status, 200);
+    assert.equal(body.ok, true);
+    assert.equal(body.opened, true);
+    assert.equal(body.server_executed, true);
+    assert.equal(body.consumed, false);
+    assert.equal(body.queued, false);
+    assert.equal(body.url, 'https://hermes.meruru.ccwu.cc/session/abc123');
+    assert.equal(server.__openedUrl, 'https://hermes.meruru.ccwu.cc/session/abc123');
+  } finally {
+    await closeAttentionServer(server);
+  }
+});
+
+test('server attention mode open_session still opens the browser when no cookie has been logged in yet', async () => {
+  const server = await startAttentionServer({
+    initialPreferences: { allow_inline_action_responses: true },
+    loginWebui: async () => ({ ok: true, cookieHeader: 'hermes_session=token.sig' }),
+    openExternal: () => true
+  });
+  try {
+    const address = server.address();
+    const base = `http://${address.address}:${address.port}`;
+    // No tickServerAttention: latestSnapshot stays null, but queuePetSessionNavigation
+    // falls back to serverAttentionConfig.baseUrl.origin (server mode).
+    const open = await fetch(`${base}/api/pet/open_session`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ session_id: 'xyz789' })
+    });
+    const body = await open.json();
+    assert.equal(open.status, 200);
+    assert.equal(body.ok, true);
+    assert.equal(body.opened, true);
+    assert.equal(body.server_executed, true);
+    assert.equal(body.url, 'https://hermes.meruru.ccwu.cc/session/xyz789');
+  } finally {
+    await closeAttentionServer(server);
+  }
+});
+
+test('adapter mode approval/respond still queues for the bridge (no server-mode regression)', async () => {
+  const server = createServer({
+    attentionMode: 'adapter',
+    preferencePath: null,
+    initialPreferences: { allow_inline_action_responses: true }
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const address = server.address();
+    const base = `http://${address.address}:${address.port}`;
+    const actionPromise = fetch(`${base}/api/approval/respond`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ session_id: 'abc123', choice: 'once', approval_id: 'ap-1' })
+    });
+    const command = await waitForCommand(base, '/api/pet/actions', (item) => item.type === 'approval.respond');
+    assert.equal(command.type, 'approval.respond');
+    const ack = await fetch(`${base}/api/pet/action_ack`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id: command.id, ok: true, status: 200, result: { ok: true } })
+    });
+    assert.equal(ack.status, 200);
+    const response = await actionPromise;
+    const result = await response.json();
+    assert.equal(response.status, 200);
+    assert.equal(result.ok, true);
+    assert.equal(result.queued, true);
+    assert.equal(result.server_executed, undefined);
+  } finally {
+    await new Promise((resolve, reject) => {
+      server.close((error) => (error ? reject(error) : resolve()));
+    });
+  }
 });

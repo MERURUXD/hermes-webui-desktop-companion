@@ -35,6 +35,15 @@ test('desktop pet body click plays jump animation without opening browser', asyn
   assert.match(petText, /stage\.addEventListener\('click',_onStageClick\)/);
 });
 
+test('desktop pet bubbles render an offline card from the server attention connection state', async () => {
+  const bubblesText = await readFile(new URL('../desktop-pet/web/bubbles.js', import.meta.url), 'utf8');
+  const cssText = await readFile(new URL('../desktop-pet/web/pet.css', import.meta.url), 'utf8');
+
+  assert.match(bubblesText, /\/pet\/connection|pet-offline/);
+  assert.match(bubblesText, /pet-offline-card/);
+  assert.match(cssText, /pet-offline-card/);
+});
+
 test('extension adapter is a bridge and does not render an in-page pet', async () => {
   const adapterText = await readFile(new URL('../extension/companion-adapter.js', import.meta.url), 'utf8');
 

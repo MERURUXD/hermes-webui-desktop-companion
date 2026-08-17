@@ -122,5 +122,14 @@ body{position:relative;outline:0;box-shadow:none;}
 .clarify-custom-input::placeholder{color:var(--pet-muted);}
 .clarify-custom-submit{height:30px;border:0;border-radius:999px;background:#8b5cf6;color:#fff;font-size:13px;font-weight:800;cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .choice-chip:disabled,.expand-actions button:disabled,.clarify-other:disabled,.clarify-custom-input:disabled,.clarify-custom-submit:disabled{opacity:.6;cursor:wait;}
+.pet-offline-card{padding:12px 14px;border-color:var(--pet-border-soft);border-radius:18px;cursor:default;background-image:none;}
+.pet-offline-card .pet-card-main{display:block;}
+.pet-offline-card .pet-card-title{white-space:normal;font-size:15px;line-height:1.18;}
+.pet-offline-card .pet-card-text{display:block;max-height:none;margin-top:3px;overflow:visible;-webkit-line-clamp:unset;-webkit-box-orient:unset;font-size:12.5px;line-height:1.22;color:var(--pet-muted);}
+.pet-offline-card:hover .pet-dismiss,.pet-offline-card:focus-within .pet-dismiss{opacity:0;}
+.pet-offline-dot{display:inline-block;width:10px;height:10px;border-radius:50%;background:#f59e0b;box-shadow:0 0 0 0 rgba(245,158,11,.45);animation:pet-offline-pulse 1.6s ease-out infinite;}
+.pet-offline-card[data-state="auth_error"] .pet-offline-dot{background:#ef4444;box-shadow:0 0 0 0 rgba(239,68,68,.45);}
+@keyframes pet-offline-pulse{0%{box-shadow:0 0 0 0 rgba(245,158,11,.45);}70%{box-shadow:0 0 0 6px rgba(245,158,11,0);}100%{box-shadow:0 0 0 0 rgba(245,158,11,0);}}
+@media (prefers-reduced-motion:reduce){.pet-offline-dot{animation:none;}}
 .pet-card-opening{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:var(--pet-overlay);border-radius:inherit;z-index:6;cursor:wait;}
 @media (prefers-reduced-motion:reduce){.pet-spinner{animation:none}.pet-dismiss{transition:none}.pet-card[data-status="running"] .pet-card-text{animation:none;background-image:none;color:var(--pet-text);-webkit-text-fill-color:currentColor;background-clip:initial;-webkit-background-clip:initial}}

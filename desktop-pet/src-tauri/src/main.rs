@@ -42,9 +42,29 @@ const LOOPBACK_ADDR: &str = "127.0.0.1:17787";
 const TRAY_AOT_ID: &str = "tray_always_on_top";
 
 fn config_path() -> PathBuf {
+    // Portable: prefer config.json next to the executable when present,
+    // otherwise fall back to %APPDATA%. Note: stale config.json files in
+    // target\release\ silently switch the read location — check before builds.
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let portable = dir.join("config.json");
+            if portable.is_file() {
+                return portable;
+            }
+        }
+    }
     if let Some(app_data) = std::env::var_os("APPDATA") { PathBuf::from(app_data).join("HermesDesktopCompanion").join("config.json") }
     else if let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) { PathBuf::from(home).join(".hermes-desktop-companion-config.json") }
     else { PathBuf::from("config.json") }
+}
+fn load_webui_password() -> Option<String> {
+    let contents = fs::read_to_string(config_path()).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&contents).ok()?;
+    value
+        .get("webui_password")
+        .and_then(|x| x.as_str())
+        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty())
 }
 fn load_always_on_top() -> bool {
     let Ok(contents) = fs::read_to_string(config_path()) else { return true; };
@@ -52,6 +72,26 @@ fn load_always_on_top() -> bool {
         Ok(value) => value.get("always_on_top").and_then(|x| x.as_bool()).unwrap_or(true),
         Err(err) => { eprintln!("failed to parse config.json, defaulting always_on_top=true: {err}"); true }
     }
+}
+
+/// Read the remote WebUI base URL from config.json (`webui_url` key).
+/// Falls back to the `HERMES_DESKTOP_PET_WEBUI_BASE` env var, then to the
+/// loopback sidecar origin. Never hardcodes a personal deployment URL.
+fn load_webui_url() -> Option<String> {
+    if let Ok(contents) = fs::read_to_string(config_path()) {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&contents) {
+            if let Some(s) = value.get("webui_url").and_then(|x| x.as_str()) {
+                let trimmed = s.trim().trim_end_matches('/');
+                if !trimmed.is_empty() {
+                    return Some(trimmed.to_string());
+                }
+            }
+        }
+    }
+    std::env::var("HERMES_DESKTOP_PET_WEBUI_BASE")
+        .ok()
+        .map(|raw| raw.trim().trim_end_matches('/').to_string())
+        .filter(|trimmed| !trimmed.is_empty())
 }
 fn save_always_on_top(enabled: bool) {
     let path = config_path();
@@ -290,10 +330,25 @@ impl Sidecar {
         let mut command = Command::new("node");
         command.args(["src/loopback-server.mjs"]).current_dir(root);
         let allowed_origins = std::env::var("HERMES_COMPANION_ALLOWED_ORIGINS")
-            .unwrap_or_else(|_| "https://hermes.meruru.ccwu.cc".into());
+            .ok()
+            .or_else(|| load_webui_url())
+            .unwrap_or_else(|| "http://127.0.0.1:17787".into());
         command.env("HERMES_COMPANION_ALLOWED_ORIGINS", allowed_origins);
         if let Ok(webui_base) = std::env::var("HERMES_DESKTOP_PET_WEBUI_BASE") {
             command.env("HERMES_DESKTOP_PET_WEBUI_BASE", webui_base);
+        }
+        // Server-attention: remote WebUI base is injected unconditionally;
+        // credentials only when a password is configured (otherwise the
+        // sidecar falls back to adapter mode on its own).
+        command.env("HERMES_COMPANION_WEBUI_REMOTE_BASE", remote_webui_url());
+        if let Some(password) = load_webui_password() {
+            command.env("HERMES_COMPANION_WEBUI_PASSWORD", password);
+            command.env("HERMES_COMPANION_ATTENTION_MODE", "server");
+        } else {
+            eprintln!(
+                "[hwdc] no webui_password in config.json — attention falls back to adapter mode"
+            );
+            command.env("HERMES_COMPANION_ATTENTION_MODE", "adapter");
         }
         #[cfg(target_os = "windows")]
         {
@@ -714,11 +769,7 @@ fn open_external_url(url: &str) {
 }
 
 fn remote_webui_url() -> String {
-    std::env::var("HERMES_DESKTOP_PET_WEBUI_BASE")
-        .ok()
-        .map(|raw| raw.trim().trim_end_matches('/').to_string())
-        .filter(|trimmed| !trimmed.is_empty())
-        .unwrap_or_else(|| "https://hermes.meruru.ccwu.cc".into())
+    load_webui_url().unwrap_or_else(|| "http://127.0.0.1:17787".into())
 }
 
 fn open_pet_gallery_manager(_app: &tauri::AppHandle) {

@@ -51,6 +51,8 @@
   let welcomeTimer=0;
   let welcomeDelayTimer=0;
   let welcomeSecondsRemaining=0;
+  // Server-attention connection state, mirrored from GET /api/pet/connection.
+  let petConnection={mode:'adapter',state:'adapter'};
 
   const I18N_FALLBACKS={
     clarify_input_placeholder:'Type a response...',
@@ -92,6 +94,11 @@
     desktop_pet_welcome_copy:'I can keep an eye on running sessions, completions, approvals, and quick replies while WebUI stays in your browser.',
     desktop_pet_welcome_countdown:'Closing in {0}s',
     desktop_pet_welcome_title:'Hello there',
+    desktop_pet_offline_title:'WebUI 离线',
+    desktop_pet_offline:'正在重连…',
+    desktop_pet_offline_auth_title:'认证失败',
+    desktop_pet_offline_auth:'请检查 config.json',
+
     settings_desktop_pet_start_failed:'Desktop pet failed to start'
   };
   function _formatFallback(value,args){return String(value).replace(/\{(\d+)\}/g,(_,idx)=>String(args[Number(idx)]??''));}
@@ -178,7 +185,7 @@
   function _isToastVisible(){return !!(readyToast&&!readyToast.hidden);}
   function _isWelcomeVisible(){return !!(welcome&&!welcome.hidden);}
   function _hasVisibleAttention(){
-    const count=_attentionItems().length;
+    const count=_attentionItems().length+(_offlineCardActive()?1:0);
     const collapsed=localStorage.getItem(COLLAPSED_KEY)==='true' && localStorage.getItem(COLLAPSE_EXPLICIT_KEY)==='1';
     return count&&!collapsed;
   }
@@ -266,6 +273,33 @@
     try{params.set('completion_unread',localStorage.getItem(SESSION_COMPLETION_UNREAD_KEY)||'{}');}catch(_){params.set('completion_unread','{}');}
     const query=params.toString();
     return query?`?${query}`:'';
+  }
+  async function _checkConnection(){
+    try{
+      const data=await fetch('/api/pet/connection',{cache:'no-store'}).then(res=>{if(!res.ok) throw new Error(`Pet connection failed: ${res.status}`);return res.json();});
+      const mode=String(data&&data.mode||'adapter');
+      const state=String(data&&data.state||'adapter');
+      if(mode!==petConnection.mode||state!==petConnection.state){
+        petConnection={mode,state};
+        render(true);
+        _scheduleBubbleSync();
+      }
+    }catch(_){/* silent: keep the last known state */}
+  }
+  // Offline/auth card: only in server attention mode, and only while the
+  // connection is actually broken (collapsed bubbles never show it).
+  function _offlineCardActive(){
+    if(petConnection.mode!=='server') return false;
+    if(petConnection.state!=='offline'&&petConnection.state!=='auth_error') return false;
+    const collapsed=localStorage.getItem(COLLAPSED_KEY)==='true' && localStorage.getItem(COLLAPSE_EXPLICIT_KEY)==='1';
+    return !collapsed;
+  }
+  function _offlineCardHtml(){
+    if(!_offlineCardActive()) return '';
+    const state=petConnection.state;
+    const title=_esc(_petT(state==='auth_error'?'desktop_pet_offline_auth_title':'desktop_pet_offline_title'));
+    const body=_esc(_petT(state==='auth_error'?'desktop_pet_offline_auth':'desktop_pet_offline'));
+    return `<article class="pet-card pet-offline-card" role="listitem" tabindex="0" data-state="${state}"><div class="pet-card-main"><div><div class="pet-card-title">${title}</div><div class="pet-card-text">${body}</div></div><div class="pet-card-status"><span class="pet-offline-dot" aria-hidden="true"></span></div></div></article>`;
   }
   function _dismissKeyForRow(row,status){
     const sid=String(row&&row.session_id||'');
@@ -560,25 +594,38 @@
   }
   function render(force){
     const items=_attentionItems();
-    const count=items.length;
+    // The offline/auth card counts as 1 bubble item so the window stays in
+    // bubbles mode and _measureBubbleContentHeight (which sizes .pet-card)
+    // can measure it (P1-7).
+    const offlineCard=_offlineCardHtml();
+    const count=items.length+(pendingPermissionPrompt?1:0)+(offlineCard?1:0);
     // Preserve the chip's :hover highlight while the user is actively reading an
     // expanded action card, but ONLY when the attention state is unchanged. Any
     // status flip (e.g. clarify -> running after the user picks) changes the
     // signature and must always re-render so the card returns to running.
     const permissionSignature=pendingPermissionPrompt?`permission:${pendingPermissionPrompt.kind}:${pendingPermissionPrompt.action&&pendingPermissionPrompt.action.sid||''}`:'';
-    const signature=`${permissionSignature}|${items.map(item=>`${item.session_id}~${item.status}~${item.dismissKey}`).join('|')}`;
+    const signature=`${permissionSignature}|${items.map(item=>`${item.session_id}~${item.status}~${item.dismissKey}`).join('|')}|${offlineCard?'offline:1':'offline:0'}`;
     const focusedInput=bubbles.contains(document.activeElement)&&document.activeElement.classList.contains('clarify-custom-input');
     if(!force&&focusedInput&&signature===lastRenderedSignature) return;
     if(!force&&expandedActionKey&&signature===lastRenderedSignature&&typeof bubbles.matches==='function'&&bubbles.matches(':hover')) return;
     lastRenderedSignature=signature;
     const collapsed=localStorage.getItem(COLLAPSED_KEY)==='true' && localStorage.getItem(COLLAPSE_EXPLICIT_KEY)==='1';
-    const displayCount=count+(pendingPermissionPrompt?1:0);
+    const displayCount=count;
     if(displayCount&&!collapsed) _hideStartupMessagesForAttention();
     bubbles.hidden=!displayCount||collapsed;
     if(!displayCount){bubbles.innerHTML='';_scheduleBubbleSync();return;}
     bubbleContentHeightDirty=true;
     const visibleKeys=new Set(items.map(item=>item.dismissKey));
     if(expandedActionKey&&!visibleKeys.has(expandedActionKey)) expandedActionKey='';
+    if(offlineCard){
+      // Content area is replaced by the offline/auth card until connectivity
+      // returns; stale session cards are hidden so no stale state lingers.
+      expandedActionKey='';
+      bubbles.innerHTML=`<div class="pet-viewport" tabindex="0"><div class="pet-list" role="list">${offlineCard}</div></div>`;
+      requestAnimationFrame(_restoreViewport);
+      _scheduleBubbleSync();
+      return;
+    }
     bubbles.innerHTML=`<div class="pet-viewport" tabindex="0"><div class="pet-list" role="list">${_permissionPromptHtml()}${items.map(item=>{const expand=_expandHtml(item);const isExpanded=expand&&item.dismissKey===expandedActionKey;return `<article class="pet-card${expand?' has-expand':''}" role="listitem" tabindex="0" data-sid="${_esc(item.session_id)}" data-status="${item.status}" data-dismiss-key="${_esc(item.dismissKey)}" data-action-type="${_esc(item.actionType||'')}"${expand?` data-expanded="${isExpanded?'1':'0'}"`:''}><button class="pet-dismiss" type="button" aria-label="${_esc(_petT('desktop_pet_dismiss_update'))}"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="20" y1="4" x2="4" y2="20"/><line x1="4" y1="4" x2="20" y2="20"/></svg></button><div class="pet-card-main"><div><div class="pet-card-title" title="${_esc(item.title)}">${_titleHtml(item)}</div><div class="pet-card-text" title="${_esc(item.tooltip||item.text)}">${_esc(item.text)}</div></div><div class="pet-card-status">${_statusHtml(item)}</div></div>${expand}${item.session_id===openingSid?'<div class="pet-card-opening" aria-hidden="true"><span class="pet-spinner"></span></div>':''}</article>`;}).join('')}</div></div><button class="pet-latest" type="button" hidden>${_esc(_petT('desktop_pet_latest'))}</button><button class="pet-more" type="button" hidden>+1</button>`;
     requestAnimationFrame(_restoreViewport);
     _scheduleBubbleSync();
@@ -657,7 +704,7 @@
     return _logicalPosition(pos.x/scale,pos.y/scale)||_physicalPosition(pos.x,pos.y);
   }
   function _bubbleMode(){
-    const count=_attentionItems().length+(pendingPermissionPrompt?1:0);
+    const count=_attentionItems().length+(pendingPermissionPrompt?1:0)+(_offlineCardActive()?1:0);
     const collapsed=localStorage.getItem(COLLAPSED_KEY)==='true' && localStorage.getItem(COLLAPSE_EXPLICIT_KEY)==='1';
     if(count&&!collapsed) return 'bubbles';
     if(_isWelcomeVisible()) return 'welcome';
@@ -731,6 +778,9 @@
       bubbleWindowSyncMode=null;
       _syncBubbleWindow(mode).catch(()=>{});
     };
+    // When bubbles content is ready but we don't yet have a pet-layout-update
+    // (e.g. offline card at boot before pet window emits), defer until layout
+    // arrives instead of letting _bubblePosition fail and hide the window.
     if(typeof requestAnimationFrame!=='function'||visibleMode==='hidden'||bubbleWindowSyncMode||(latestPetLayout&&latestPetLayout.dragging)){
       bubbleWindowSyncFrame=setTimeout(run,0);
       return;
@@ -864,6 +914,12 @@
       const pos=_bubblePosition(latestPetLayout,desired,mode);
       if(seq!==layoutSeq) return;
       if(!pos){
+        if(!latestPetLayout && mode!=='hidden'){
+          // Defer until pet-layout-update arrives; hiding here makes the
+          // offline card vanish at boot and only reappear on drag.
+          bubbleWindowSyncFrame=setTimeout(()=>_syncBubbleWindow(mode).catch(()=>{}),200);
+          return;
+        }
         visibleMode='hidden';
         bubbleWindowCache={mode:'hidden',logicalWidth:0,logicalHeight:0,x:0,y:0};
         if(typeof win.hide==='function') await win.hide();
@@ -956,6 +1012,7 @@
     const card=target.closest('.pet-card');
     if(!card) return;
     if(card.classList.contains('pet-permission-card')) return;
+    if(card.classList.contains('pet-offline-card')) return;
     if(target.closest('.pet-dismiss')){dismissed[card.dataset.dismissKey||`${card.dataset.sid}:${card.dataset.status}`]=true;_writeJson(DISMISSED_KEY,dismissed);render();return;}
 
     const approveBtn=target.closest('.btn-approve');
@@ -1081,6 +1138,7 @@
     });}catch(err){console.warn('Failed to listen for pet visibility changes',err);}
   }
   setInterval(refresh,POLL_MS);
+  setInterval(()=>{_checkConnection();},POLL_MS);
   setInterval(()=>{
     const els=document.querySelectorAll('.pet-elapsed[data-started-at]');
     for(let i=0;i<els.length;i++){
@@ -1101,7 +1159,10 @@
     try{initialBubbleStyle=localStorage.getItem(BUBBLE_STYLE_KEY)||'default';}catch(_){}
     _applyBubbleStyle(initialBubbleStyle);
     _listenBubbleStyleChanges();
-
+    // Boot-time connection check: await so petConnection is updated before
+    // the first render runs, otherwise offline cards are missed (initial
+    // state defaults to adapter and render() hides bubbles with count=0).
+    await _checkConnection();
   }
   _bootBubbles();
 })();
