@@ -12,7 +12,7 @@ use std::thread;
 use std::time::Duration;
 use tauri::menu::{CheckMenuItemBuilder, MenuBuilder, SubmenuBuilder};
 use tauri::tray::TrayIconBuilder;
-use tauri::{Emitter, Listener, Manager, Url, WebviewWindow};
+use tauri::{Emitter, Listener, Manager, Url, WebviewWindow, WindowEvent};
 
 #[cfg(target_os = "windows")]
 use windows::Win32::Foundation::{CloseHandle, GetLastError, HANDLE, ERROR_ALREADY_EXISTS};
@@ -1183,6 +1183,15 @@ fn main() {
                 });
             });
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            if !matches!(window.label(), "pet" | "pet_bubbles") {
+                return;
+            }
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+            }
         })
         .on_menu_event(move |app, event| {
             let id = event.id().as_ref();

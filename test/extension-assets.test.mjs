@@ -646,6 +646,15 @@ test('desktop pet keeps the migrated PR2916 bubble window choreography', async (
   assert.match(tauriMainText, /fn restore_pet_window_layers_during_startup/);
   assert.match(tauriMainText, /Duration::from_millis\(1200\)/);
   assert.match(tauriMainText, /restore_pet_window_layers_during_startup\(app\.handle\(\)\.clone\(\)\)/);
+
+  // Regression: system close of pet / pet_bubbles must be intercepted so the
+  // tray Show/Hide can still recover them (Tauri default would destroy the
+  // webview, making it unrestorable).
+  assert.match(tauriMainText, /\bon_window_event\s*\(/);
+  assert.match(tauriMainText, /WindowEvent::CloseRequested\s*\{\s*api\s*,\s*\.\.\s*\}/);
+  assert.match(tauriMainText, /api\.prevent_close\(\)/);
+  assert.match(tauriMainText, /window\.hide\(\)/);
+  assert.match(tauriMainText, /matches!\(window\.label\(\),\s*"pet"\s*\|\s*"pet_bubbles"\)/);
 });
 
 test('extension manifest bundles adapter assets', async () => {
