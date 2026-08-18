@@ -2504,8 +2504,13 @@ export function createServer(options = {}) {
     if (!sessionId) throw Object.assign(new Error('session_id is required'), { statusCode: 400 });
     // P2-14: the adapter page is usually absent in server-attention mode, so
     // fall back to the remote WebUI base when no loopback origin is known.
+    // In adapter mode the configured WebUI base is the last-resort origin so
+    // session navigation keeps working without a live snapshot (a browser tab
+    // is opened/focused to the session URL). Only a complete lack of any
+    // lawful URL yields 409 webui_snapshot_unavailable.
     const origin = latestWebuiOrigin(latestSnapshot)
-      || (serverAttentionActive && serverAttentionConfig.baseUrl ? serverAttentionConfig.baseUrl.origin : null);
+      || (serverAttentionActive && serverAttentionConfig.baseUrl ? serverAttentionConfig.baseUrl.origin : null)
+      || (!serverAttentionActive && configuredWebuiUrl(options) ? configuredWebuiUrl(options).origin : null);
     if (!origin) throw Object.assign(new Error('webui_snapshot_unavailable'), { statusCode: 409 });
     const targetUrl = `${origin}/session/${encodeURIComponent(sessionId)}`;
     const now = Date.now();
@@ -2921,7 +2926,8 @@ export function createServer(options = {}) {
         const body = await readJson(req);
         const command = queuePetSessionNavigation(body);
         const origin = latestWebuiOrigin(latestSnapshot)
-          || (serverAttentionActive && serverAttentionConfig.baseUrl ? serverAttentionConfig.baseUrl.origin : null);
+          || (serverAttentionActive && serverAttentionConfig.baseUrl ? serverAttentionConfig.baseUrl.origin : null)
+          || (!serverAttentionActive && configuredWebuiUrl(options) ? configuredWebuiUrl(options).origin : null);
         if (serverAttentionActive) {
           // Server mode: the adapter page is absent, so skip the bridge ack
           // wait entirely. The browser is opened/focused to the session URL;

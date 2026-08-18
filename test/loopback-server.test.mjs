@@ -1990,3 +1990,41 @@ test('adapter mode approval/respond still queues for the bridge (no server-mode 
     });
   }
 });
+
+test('pet open_session falls back to the configured WebUI base in adapter mode without a snapshot', async () => {
+  const openExternalCalls = [];
+  const focusExistingBrowserTabCalls = [];
+  const server = createServer({
+    attentionMode: 'adapter',
+    preferencePath: null,
+    webuiBaseUrl: 'http://127.0.0.1:8788/',
+    focusExistingBrowserTab: false,
+    openExternal: (url) => {
+      openExternalCalls.push(url);
+      return true;
+    }
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  const base = `http://${address.address}:${address.port}`;
+  try {
+    // No /api/webui/snapshot POST: latestSnapshot stays empty, so the
+    // session-navigation origin must fall back to the configured WebUI base.
+    const open = await fetch(`${base}/api/pet/open_session`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ session_id: 's1' })
+    });
+    const opened = await open.json();
+
+    assert.equal(open.status, 200, 'adapter mode without a snapshot must not 409 when a WebUI base is configured');
+    assert.equal(opened.opened, true, 'must open a browser tab to the configured WebUI session URL');
+    assert.equal(opened.url, 'http://127.0.0.1:8788/session/s1');
+    assert.deepEqual(openExternalCalls, ['http://127.0.0.1:8788/session/s1']);
+    assert.equal(focusExistingBrowserTabCalls.length, 0);
+  } finally {
+    await new Promise((resolve, reject) => {
+      server.close((error) => (error ? reject(error) : resolve()));
+    });
+  }
+});
