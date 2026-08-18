@@ -21,7 +21,10 @@ use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromWindow, MONITORI
 #[cfg(target_os = "windows")]
 use windows::Win32::System::Threading::CreateMutexW;
 #[cfg(target_os = "windows")]
-use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowRect, GetWindowThreadProcessId, IsZoomed};
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetForegroundWindow, GetWindowLongW, GetWindowRect, GetWindowThreadProcessId, IsZoomed,
+    GWL_STYLE, WS_CAPTION, WS_THICKFRAME,
+};
 
 const CLOSE_PET_MENU_ID: &str = "close_pet";
 const MANAGE_PETS_MENU_ID: &str = "manage_pets";
@@ -878,7 +881,7 @@ fn window_is_ours(hwnd: HWND) -> bool {
 #[cfg(target_os = "windows")]
 fn is_fullscreen_foreground() -> bool {
     let hwnd = unsafe { GetForegroundWindow() };
-    if hwnd.is_invalid() || window_is_ours(hwnd) || unsafe { IsZoomed(hwnd).as_bool() } {
+    if hwnd.is_invalid() || window_is_ours(hwnd) {
         return false;
     }
     let mut window_rect = RECT::default();
@@ -887,10 +890,25 @@ fn is_fullscreen_foreground() -> bool {
     if monitor.is_invalid() { return false; }
     let mut info = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
     if !unsafe { GetMonitorInfoW(monitor, &mut info) }.as_bool() { return false; }
-    window_rect.left <= info.rcMonitor.left
+    // Window must cover the entire monitor (rcMonitor, not rcWork).
+    let covers_monitor = window_rect.left <= info.rcMonitor.left
         && window_rect.top <= info.rcMonitor.top
         && window_rect.right >= info.rcMonitor.right
-        && window_rect.bottom >= info.rcMonitor.bottom
+        && window_rect.bottom >= info.rcMonitor.bottom;
+    if !covers_monitor {
+        return false;
+    }
+    // Distinguish borderless fullscreen from ordinary maximized windows.
+    // Classic fullscreen (F11, PowerPoint, exclusive): IsZoomed is false.
+    // Borderless fullscreen games: IsZoomed is true, but window has no
+    // caption or sizing border (WS_POPUP without WS_CAPTION/WS_THICKFRAME).
+    // Ordinary maximized (incl. auto-hide taskbar): IsZoomed is true and
+    // the window retains WS_CAPTION and/or WS_THICKFRAME.
+    if !unsafe { IsZoomed(hwnd).as_bool() } {
+        return true; // classic fullscreen, not maximized
+    }
+    let style = unsafe { GetWindowLongW(hwnd, GWL_STYLE) } as u32;
+    style & (WS_CAPTION.0 | WS_THICKFRAME.0) == 0
 }
 
 #[derive(Clone, Copy, Default)]
@@ -933,6 +951,7 @@ fn start_fullscreen_monitor(
                         }
                         for label in ["pet", "pet_bubbles"] {
                             if let Some(window) = handle.get_webview_window(label) {
+                                let _ = window.set_always_on_top(false);
                                 let _ = window.hide();
                             }
                         }
@@ -955,9 +974,12 @@ fn start_fullscreen_monitor(
 fn restore_window_visibility(app: &tauri::AppHandle, pet_visible: bool, bubbles_visible: bool) {
     let handle = app.clone();
     let _ = handle.clone().run_on_main_thread(move || {
+        // Read current AOT preference (user may have toggled it during fullscreen)
+        let aot = handle.state::<AlwaysOnTopFlag>().0.load(Ordering::SeqCst);
         for (label, should_show) in [("pet", pet_visible), ("pet_bubbles", bubbles_visible)] {
             if should_show {
                 if let Some(window) = handle.get_webview_window(label) {
+                    let _ = window.set_always_on_top(aot);
                     if !window.is_visible().unwrap_or(false) { let _ = window.show(); }
                 }
             }
@@ -990,9 +1012,16 @@ fn build_tray(app: &tauri::AppHandle, user_hidden: Arc<AtomicBool>, always_on_to
                 let handle = app.clone();
                 let window_handle = handle.clone();
                 let hidden_state = user_hidden.clone();
+                let fs_hide = fullscreen_hide.clone();
+                let fs_vis = fullscreen_visibility.clone();
                 let _ = handle.run_on_main_thread(move || {
+                    // Suppress show if fullscreen auto-hide is active.
+                    let fs_active = fs_hide.load(Ordering::SeqCst)
+                        && fs_vis.lock()
+                            .map(|state| state.active)
+                            .unwrap_or(false);
                     let show = if hidden_state.load(Ordering::SeqCst) {
-                        true
+                        !fs_active // would show, but not during fullscreen
                     } else {
                         window_handle
                             .get_webview_window("pet")
@@ -1223,7 +1252,18 @@ fn main() {
                     .and_then(|payload| payload.focus)
                     .unwrap_or(false);
                 let hidden_state = raise_user_hidden.clone();
+                let fs_hide = raise_fullscreen_hide.clone();
+                let fs_vis = raise_fullscreen_visibility.clone();
                 let _ = runner_handle.run_on_main_thread(move || {
+                    // Double-check fullscreen active inside main thread to close
+                    // the race where the monitor thread's closure hasn't run yet.
+                    if fs_hide.load(Ordering::SeqCst)
+                        && fs_vis.lock()
+                            .map(|state| state.active)
+                            .unwrap_or(false)
+                    {
+                        return;
+                    }
                     apply_bubble_visibility(&control_handle, &visible_state, visible, focus);
                     if let Some(window) = window_handle.get_webview_window("pet") {
                         let _ = window.set_ignore_cursor_events(false);
@@ -1268,7 +1308,17 @@ fn main() {
                     .lock()
                     .map(|state| *state != visible)
                     .unwrap_or(true);
+                let fs_hide = attention_fullscreen_hide.clone();
+                let fs_vis = attention_fullscreen_visibility.clone();
                 let _ = handle.run_on_main_thread(move || {
+                    // Double-check fullscreen active inside main thread.
+                    if fs_hide.load(Ordering::SeqCst)
+                        && fs_vis.lock()
+                            .map(|state| state.active)
+                            .unwrap_or(false)
+                    {
+                        return;
+                    }
                     if should_apply {
                         apply_bubble_visibility(&handle_for_window, &visible_state, visible, false);
                     }
