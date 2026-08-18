@@ -691,6 +691,81 @@ test('desktop pet keeps the migrated PR2916 bubble window choreography', async (
   assert.ok(petShowIdx > petNavigateIdx, 'pet_window.show() must come after navigate_window_to_webui(app, "pet", ...)');
 });
 
+test('desktop pet reasserts always-on-top after tray Show and raise paths', async () => {
+  const tauriMainText = await readFile(new URL('../desktop-pet/src-tauri/src/main.rs', import.meta.url), 'utf8');
+
+  // Tray Show/Hide pet branch must re-assert window layers via the unified
+  // restore helper immediately after window.show(), plus a short delayed
+  // re-assertion (~120ms) to settle the always-on-top flag after the window
+  // has been surfaced. Weak string matching alone is not enough: we require
+  // the restore helper name and the 120ms delay literal both inside the
+  // TRAY_TOGGLE_ID Show branch.
+  const trayToggleShowStart = tauriMainText.indexOf('TRAY_TOGGLE_ID =>');
+  assert.ok(trayToggleShowStart > -1, 'TRAY_TOGGLE_ID branch must exist');
+  const trayToggleShowEnd = tauriMainText.indexOf('TRAY_AOT_ID =>', trayToggleShowStart);
+  assert.ok(trayToggleShowEnd > trayToggleShowStart, 'TRAY_AOT_ID branch must follow TRAY_TOGGLE_ID');
+  const trayToggleShowBlock = tauriMainText.slice(trayToggleShowStart, trayToggleShowEnd);
+
+  // Show branch surfaces both pet + pet_bubbles, then re-asserts layers.
+  assert.match(trayToggleShowBlock, /window\.show\(\)/);
+  assert.ok(
+    trayToggleShowBlock.includes('restore_pet_window_layers('),
+    'Show branch must call restore_pet_window_layers immediately after window.show()'
+  );
+  assert.ok(
+    trayToggleShowBlock.includes('restore_pet_window_layers_later('),
+    'Show branch must schedule a delayed restore_pet_window_layers_later re-assert'
+  );
+  assert.ok(
+    trayToggleShowBlock.includes('Duration::from_millis(120)'),
+    'Show branch must schedule the delayed re-assert with ~120ms (Duration::from_millis(120))'
+  );
+
+  // AOT toggle-on branch must route through restore_pet_window_layers rather
+  // than only a raw set_always_on_top(next) loop, so the native window level
+  // is also re-established.
+  const aotStart = tauriMainText.indexOf('TRAY_AOT_ID =>', 0);
+  const aotEnd = tauriMainText.indexOf('TRAY_OPEN_WEBUI_ID =>', aotStart);
+  assert.ok(aotEnd > aotStart, 'TRAY_OPEN_WEBUI_ID branch must follow TRAY_AOT_ID');
+  const aotBlock = tauriMainText.slice(aotStart, aotEnd);
+  const nextIdx = aotBlock.indexOf('next');
+  assert.ok(nextIdx > -1, 'AOT branch must define `next` state');
+  // Toggle-ON path re-asserts via the unified restore helper.
+  assert.ok(
+    aotBlock.includes('restore_pet_window_layers('),
+    'AOT toggle-on must call restore_pet_window_layers (not only raw set_always_on_top)'
+  );
+  // Toggle-OFF path must explicitly set_always_on_top(false) on both windows —
+  // never allow a false state to become true via any path.
+  assert.ok(
+    aotBlock.includes('set_always_on_top(false)'),
+    'AOT toggle-off must explicitly set_always_on_top(false) on pet/pet_bubbles'
+  );
+
+  // PET_RAISE_REQUESTED_EVENT handler must re-assert layers only when the pet
+  // window is actually shown (not when hidden_state is set), and must use both
+  // the immediate + delayed restore helpers.
+  const raiseStart = tauriMainText.indexOf('PET_RAISE_REQUESTED_EVENT');
+  assert.ok(raiseStart > -1, 'PET_RAISE_REQUESTED_EVENT listener must exist');
+  // Find the enclosing listener closure: from raiseStart to the next
+  // app.listen( ending the block.
+  const nextListenIdx = tauriMainText.indexOf('app.listen(', raiseStart + 1);
+  const raiseBlockEnd = nextListenIdx > -1 ? nextListenIdx : tauriMainText.length;
+  const raiseBlock = tauriMainText.slice(raiseStart, raiseBlockEnd);
+
+  // The raise handler shows the pet window inside an `if (!hidden_state)`
+  // guard, and only after show() does it re-assert layers.
+  assert.match(raiseBlock, /window\.show\(\)/, 'raise handler must show pet window');
+  assert.ok(
+    raiseBlock.includes('restore_pet_window_layers('),
+    'raise handler must call restore_pet_window_layers immediately after pet show'
+  );
+  assert.ok(
+    raiseBlock.includes('restore_pet_window_layers_later('),
+    'raise handler must schedule restore_pet_window_layers_later after pet show'
+  );
+});
+
 test('extension manifest bundles adapter assets', async () => {
   const manifestText = await readFile(new URL('../extension/manifest.json', import.meta.url), 'utf8');
   const manifest = JSON.parse(manifestText);

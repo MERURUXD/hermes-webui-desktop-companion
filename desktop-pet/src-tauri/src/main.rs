@@ -873,9 +873,42 @@ fn build_tray(app: &tauri::AppHandle, user_hidden: Arc<AtomicBool>, always_on_to
                             }
                         }
                     }
+                    // After surfacing the windows, re-assert the always-on-top
+                    // + native window level via the unified restore helper so
+                    // the platform never drops the AOT flag right after show()
+                    // (E0505/E0507 settle behaviour). A short delayed re-assert
+                    // (~120ms) catches any wry transient that re-asserts after
+                    // the show() completes.
+                    if show {
+                        restore_pet_window_layers(&window_handle);
+                        restore_pet_window_layers_later(window_handle.clone(), Duration::from_millis(120));
+                    }
                 });
             }
-            TRAY_AOT_ID => { let next = !always_on_top.load(Ordering::SeqCst); always_on_top.store(next, Ordering::SeqCst); let _ = aot_item_for_event.set_checked(next); let handle = app.clone(); let _ = handle.clone().run_on_main_thread(move || { for label in ["pet", "pet_bubbles"] { if let Some(window) = handle.get_webview_window(label) { let _ = window.set_always_on_top(next); } } }); save_always_on_top(next); }
+            TRAY_AOT_ID => {
+                let next = !always_on_top.load(Ordering::SeqCst);
+                always_on_top.store(next, Ordering::SeqCst);
+                let _ = aot_item_for_event.set_checked(next);
+                let handle = app.clone();
+                let _ = handle.clone().run_on_main_thread(move || {
+                    // Toggle ON: route through the unified restore helper so the
+                    // native window level is re-established alongside the
+                    // always-on-top flag (handles wry transient that drops it).
+                    // Toggle OFF: explicitly set_always_on_top(false) on both
+                    // windows — never allow a false state to become true via any
+                    // path.
+                    if next {
+                        restore_pet_window_layers(&handle);
+                    } else {
+                        for label in ["pet", "pet_bubbles"] {
+                            if let Some(window) = handle.get_webview_window(label) {
+                                let _ = window.set_always_on_top(false);
+                            }
+                        }
+                    }
+                });
+                save_always_on_top(next);
+            }
             TRAY_OPEN_WEBUI_ID => open_external_url(&remote_webui_url()),
             TRAY_QUIT_ID => app.exit(0),
             _ => {}
@@ -1028,6 +1061,13 @@ fn main() {
                         install_first_click_handler(&window);
                         if !hidden_state.load(Ordering::SeqCst) {
                             let _ = window.show();
+                            // Pet was actually shown: re-assert the AOT + native
+                            // window level via the unified restore helper so the
+                            // platform keeps the on-top flag after show(), plus
+                            // a short delayed re-assert (~120ms) for any wry
+                            // transient that re-asserts after show() completes.
+                            restore_pet_window_layers(&window_handle);
+                            restore_pet_window_layers_later(window_handle.clone(), Duration::from_millis(120));
                         }
                     }
                 });
