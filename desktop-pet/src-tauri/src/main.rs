@@ -15,9 +15,13 @@ use tauri::tray::TrayIconBuilder;
 use tauri::{Emitter, Listener, Manager, Url, WebviewWindow, WindowEvent};
 
 #[cfg(target_os = "windows")]
-use windows::Win32::Foundation::{CloseHandle, GetLastError, HANDLE, ERROR_ALREADY_EXISTS};
+use windows::Win32::Foundation::{CloseHandle, GetLastError, HANDLE, ERROR_ALREADY_EXISTS, HWND, RECT};
+#[cfg(target_os = "windows")]
+use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST};
 #[cfg(target_os = "windows")]
 use windows::Win32::System::Threading::CreateMutexW;
+#[cfg(target_os = "windows")]
+use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowRect, GetWindowThreadProcessId, IsZoomed};
 
 const CLOSE_PET_MENU_ID: &str = "close_pet";
 const MANAGE_PETS_MENU_ID: &str = "manage_pets";
@@ -74,6 +78,14 @@ fn load_always_on_top() -> bool {
     }
 }
 
+fn load_fullscreen_hide_enabled() -> bool {
+    let Ok(contents) = fs::read_to_string(config_path()) else { return true; };
+    match serde_json::from_str::<serde_json::Value>(&contents) {
+        Ok(value) => value.get("fullscreen_hide").and_then(|x| x.as_bool()).unwrap_or(true),
+        Err(err) => { eprintln!("failed to parse config.json, defaulting fullscreen_hide=true: {err}"); true }
+    }
+}
+
 /// Read the remote WebUI base URL from config.json (`webui_url` key).
 /// Falls back to the `HERMES_DESKTOP_PET_WEBUI_BASE` env var, then to the
 /// loopback sidecar origin. Never hardcodes a personal deployment URL.
@@ -109,6 +121,32 @@ fn save_always_on_top(enabled: bool) {
         eprintln!("failed to rename config into place: {err}");
     }
 }
+fn save_fullscreen_hide_enabled(enabled: bool) {
+    let path = config_path();
+    let mut config = fs::read_to_string(&path)
+        .ok()
+        .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    if let Some(obj) = config.as_object_mut() {
+        obj.insert("fullscreen_hide".into(), serde_json::Value::Bool(enabled));
+    }
+    if let Some(parent) = path.parent() {
+        if let Err(err) = fs::create_dir_all(parent) {
+            eprintln!("failed to create config dir: {err}");
+            return;
+        }
+    }
+    let tmp = path.with_extension("json.tmp");
+    if let Err(err) = fs::write(&tmp, serde_json::to_string_pretty(&config).unwrap_or_default()) {
+        eprintln!("failed to write config: {err}");
+        return;
+    }
+    if let Err(err) = fs::rename(&tmp, &path) {
+        eprintln!("failed to rename config into place: {err}");
+        let _ = fs::remove_file(&tmp);
+    }
+}
+
 fn load_pet_scale() -> u16 {
     let Ok(contents) = fs::read_to_string(config_path()) else { return 100; };
     match serde_json::from_str::<serde_json::Value>(&contents) {
@@ -828,13 +866,114 @@ fn pet_context_menu_payload(payload: &str) -> PetContextMenuPayload {
 const TRAY_TOGGLE_ID: &str = "tray_toggle_pet";
 const TRAY_OPEN_WEBUI_ID: &str = "tray_open_webui";
 const TRAY_QUIT_ID: &str = "tray_quit";
+const TRAY_FULLSCREEN_HIDE_ID: &str = "tray_fullscreen_hide";
 
-fn build_tray(app: &tauri::AppHandle, user_hidden: Arc<AtomicBool>, always_on_top: Arc<AtomicBool>) -> Result<(), tauri::Error> {
+#[cfg(target_os = "windows")]
+fn window_is_ours(hwnd: HWND) -> bool {
+    let mut pid = 0u32;
+    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)); }
+    pid == std::process::id()
+}
+
+#[cfg(target_os = "windows")]
+fn is_fullscreen_foreground() -> bool {
+    let hwnd = unsafe { GetForegroundWindow() };
+    if hwnd.is_invalid() || window_is_ours(hwnd) || unsafe { IsZoomed(hwnd).as_bool() } {
+        return false;
+    }
+    let mut window_rect = RECT::default();
+    if unsafe { GetWindowRect(hwnd, &mut window_rect) }.is_err() { return false; }
+    let monitor = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
+    if monitor.is_invalid() { return false; }
+    let mut info = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+    if !unsafe { GetMonitorInfoW(monitor, &mut info) }.as_bool() { return false; }
+    window_rect.left <= info.rcMonitor.left
+        && window_rect.top <= info.rcMonitor.top
+        && window_rect.right >= info.rcMonitor.right
+        && window_rect.bottom >= info.rcMonitor.bottom
+}
+
+#[derive(Clone, Copy, Default)]
+struct FullscreenVisibility {
+    active: bool,
+    pet_visible: bool,
+    bubbles_visible: bool,
+}
+
+#[cfg(target_os = "windows")]
+fn start_fullscreen_monitor(
+    app: tauri::AppHandle,
+    enabled: Arc<AtomicBool>,
+    saved_visibility: Arc<Mutex<FullscreenVisibility>>,
+) {
+    thread::spawn(move || {
+        let mut fullscreen = false;
+        loop {
+            let next = enabled.load(Ordering::Relaxed) && is_fullscreen_foreground();
+            if next != fullscreen {
+                fullscreen = next;
+                let handle = app.clone();
+                let visibility = saved_visibility.clone();
+                if next {
+                    let _ = handle.clone().run_on_main_thread(move || {
+                        let pet_visible = handle
+                            .get_webview_window("pet")
+                            .and_then(|w| w.is_visible().ok())
+                            .unwrap_or(false);
+                        let bubbles_visible = handle
+                            .get_webview_window("pet_bubbles")
+                            .and_then(|w| w.is_visible().ok())
+                            .unwrap_or(false);
+                        if let Ok(mut saved) = visibility.lock() {
+                            *saved = FullscreenVisibility {
+                                active: true,
+                                pet_visible,
+                                bubbles_visible,
+                            };
+                        }
+                        for label in ["pet", "pet_bubbles"] {
+                            if let Some(window) = handle.get_webview_window(label) {
+                                let _ = window.hide();
+                            }
+                        }
+                        emit_pet_visibility(&handle, false);
+                    });
+                } else {
+                    let saved = visibility.lock().map(|value| *value).unwrap_or_default();
+                    if let Ok(mut visibility) = visibility.lock() {
+                        visibility.active = false;
+                    }
+                    restore_window_visibility(&handle, saved.pet_visible, saved.bubbles_visible);
+                    emit_pet_visibility(&handle, saved.pet_visible);
+                }
+            }
+            thread::sleep(Duration::from_secs(1));
+        }
+    });
+}
+
+fn restore_window_visibility(app: &tauri::AppHandle, pet_visible: bool, bubbles_visible: bool) {
+    let handle = app.clone();
+    let _ = handle.clone().run_on_main_thread(move || {
+        for (label, should_show) in [("pet", pet_visible), ("pet_bubbles", bubbles_visible)] {
+            if should_show {
+                if let Some(window) = handle.get_webview_window(label) {
+                    if !window.is_visible().unwrap_or(false) { let _ = window.show(); }
+                }
+            }
+        }
+    });
+}
+
+fn build_tray(app: &tauri::AppHandle, user_hidden: Arc<AtomicBool>, always_on_top: Arc<AtomicBool>, fullscreen_hide: Arc<AtomicBool>, fullscreen_visibility: Arc<Mutex<FullscreenVisibility>>) -> Result<(), tauri::Error> {
     let aot_item = CheckMenuItemBuilder::with_id(TRAY_AOT_ID, "Always on top").checked(always_on_top.load(Ordering::SeqCst)).build(app)?;
     let aot_item_for_event = aot_item.clone();
+    let fullscreen_item = CheckMenuItemBuilder::with_id(TRAY_FULLSCREEN_HIDE_ID, "Fullscreen auto-hide").checked(fullscreen_hide.load(Ordering::SeqCst)).build(app)?;
+    let fullscreen_item_for_event = fullscreen_item.clone();
     let menu = MenuBuilder::new(app)
         .text(TRAY_TOGGLE_ID, "Show/Hide pet")
         .item(&aot_item)
+        .item(&fullscreen_item)
         .text(TRAY_OPEN_WEBUI_ID, "Open WebUI")
         .separator()
         .text(TRAY_QUIT_ID, "Quit")
@@ -907,6 +1046,21 @@ fn build_tray(app: &tauri::AppHandle, user_hidden: Arc<AtomicBool>, always_on_to
                 });
                 save_always_on_top(next);
             }
+            TRAY_FULLSCREEN_HIDE_ID => {
+                let next = !fullscreen_hide.load(Ordering::SeqCst);
+                fullscreen_hide.store(next, Ordering::SeqCst);
+                let _ = fullscreen_item_for_event.set_checked(next);
+                save_fullscreen_hide_enabled(next);
+                if !next {
+                    let saved = fullscreen_visibility.lock().map(|value| *value).unwrap_or_default();
+                    if saved.active {
+                        if let Ok(mut visibility) = fullscreen_visibility.lock() {
+                            visibility.active = false;
+                        }
+                        restore_window_visibility(app, saved.pet_visible, saved.bubbles_visible);
+                    }
+                }
+            }
             TRAY_OPEN_WEBUI_ID => open_external_url(&remote_webui_url()),
             TRAY_QUIT_ID => app.exit(0),
             _ => {}
@@ -975,6 +1129,12 @@ fn main() {
     let always_on_top = Arc::new(AtomicBool::new(load_always_on_top()));
     let always_on_top_for_setup = always_on_top.clone();
     let always_on_top_for_tray = always_on_top.clone();
+    let fullscreen_hide = Arc::new(AtomicBool::new(load_fullscreen_hide_enabled()));
+    let fullscreen_hide_for_setup = fullscreen_hide.clone();
+    let fullscreen_hide_for_tray = fullscreen_hide.clone();
+    let fullscreen_visibility = Arc::new(Mutex::new(FullscreenVisibility::default()));
+    let fullscreen_visibility_for_tray = fullscreen_visibility.clone();
+    let fullscreen_visibility_for_setup = fullscreen_visibility.clone();
     let pet_scale = Arc::new(AtomicU16::new(load_pet_scale()));
     let pet_scale_for_setup = pet_scale.clone();
     tauri::Builder::default()
@@ -983,7 +1143,9 @@ fn main() {
             app.manage(sidecar);
             app.manage(AlwaysOnTopFlag(always_on_top_for_setup.clone()));
             app.manage(PetScaleFlag(pet_scale_for_setup.clone()));
-            build_tray(app.handle(), user_hidden_for_tray.clone(), always_on_top_for_tray)?;
+            build_tray(app.handle(), user_hidden_for_tray.clone(), always_on_top_for_tray, fullscreen_hide_for_tray.clone(), fullscreen_visibility_for_tray)?;
+            #[cfg(target_os = "windows")]
+            start_fullscreen_monitor(app.handle().clone(), fullscreen_hide_for_setup.clone(), fullscreen_visibility_for_setup);
 
             // Initialize pet/bubbles BEFORE navigation and re-assert
             // skip_taskbar on each window so the config-driven creation
@@ -1031,6 +1193,8 @@ fn main() {
             let raise_handle = app.handle().clone();
             let raise_visible_state = bubble_visible_state_for_setup.clone();
             let raise_user_hidden = user_hidden_for_setup.clone();
+            let raise_fullscreen_hide = fullscreen_hide_for_setup.clone();
+            let raise_fullscreen_visibility = fullscreen_visibility_for_setup.clone();
             app.listen(PET_RAISE_REQUESTED_EVENT, move |event| {
                 let handle = raise_handle.clone();
                 let window_handle = handle.clone();
@@ -1043,6 +1207,15 @@ fn main() {
                     .and_then(|payload| payload.visible)
                     .unwrap_or(true);
                 if raise_user_hidden.load(Ordering::SeqCst) && visible {
+                    return;
+                }
+                if raise_fullscreen_hide.load(Ordering::SeqCst)
+                    && raise_fullscreen_visibility
+                        .lock()
+                        .map(|state| state.active)
+                        .unwrap_or(false)
+                    && visible
+                {
                     return;
                 }
                 let focus = payload
@@ -1072,10 +1245,21 @@ fn main() {
             let app_handle = app.handle().clone();
             let attention_visible_state = bubble_visible_state_for_setup.clone();
             let attention_user_hidden = user_hidden_for_setup.clone();
+            let attention_fullscreen_hide = fullscreen_hide_for_setup.clone();
+            let attention_fullscreen_visibility = fullscreen_visibility_for_setup.clone();
             app.listen("pet-attention-update", move |event| {
                 let handle = app_handle.clone();
                 let visible = parse_attention_visibility(event.payload());
                 if attention_user_hidden.load(Ordering::SeqCst) && visible {
+                    return;
+                }
+                if attention_fullscreen_hide.load(Ordering::SeqCst)
+                    && attention_fullscreen_visibility
+                        .lock()
+                        .map(|state| state.active)
+                        .unwrap_or(false)
+                    && visible
+                {
                     return;
                 }
                 let handle_for_window = handle.clone();
