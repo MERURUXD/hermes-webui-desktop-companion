@@ -2929,10 +2929,37 @@ export function createServer(options = {}) {
           || (serverAttentionActive && serverAttentionConfig.baseUrl ? serverAttentionConfig.baseUrl.origin : null)
           || (!serverAttentionActive && configuredWebuiUrl(options) ? configuredWebuiUrl(options).origin : null);
         if (serverAttentionActive) {
-          // Server mode: the adapter page is absent, so skip the bridge ack
-          // wait entirely. The browser is opened/focused to the session URL;
-          // any draft/autosend payload is silently dropped (P2-1 accepted:
-          // the user lands on the session page and can send from there).
+          // Server mode: an adapter page is usually absent, so historically
+          // this skipped the bridge ack wait entirely and opened/focused a
+          // browser tab. However, when a WebUI bridge IS active (it recently
+          // polled /api/pet/navigation), prefer reusing that existing tab via
+          // the navigation ack BEFORE falling back to opening a new browser
+          // tab — same priority as adapter mode. Draft/autosend payloads
+          // still follow the server-mode semantic: they are silently dropped
+          // unless the bridge actually acks the command (no hard 504).
+          const hasActiveBridge = bridgeRecentlyPolled();
+          let consumed = false;
+          if (hasActiveBridge) {
+            consumed = await waitForNavigationAck(command.id);
+          }
+          if (consumed) {
+            sendJson(res, 200, {
+              ok: true,
+              consumed: true,
+              opened: false,
+              focused: false,
+              reused: false,
+              queued: true,
+              command,
+              url: command.url,
+              server_executed: true
+            }, headers);
+            return;
+          }
+          // No fresh bridge or ack not consumed: fall back to opening/focusing
+          // a browser tab. Draft/autosend payloads are silently dropped (P2-1
+          // accepted: the user lands on the session page and can send from
+          // there).
           const focused = await focusOrOpenBrowserUrl(command.url, origin, options);
           sendJson(res, 200, {
             ok: true,

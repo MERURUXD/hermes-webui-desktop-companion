@@ -2028,3 +2028,114 @@ test('pet open_session falls back to the configured WebUI base in adapter mode w
     });
   }
 });
+
+test('server attention mode open_session reuses an active WebUI bridge before browser fallback', async () => {
+  const openExternalCalls = [];
+  const focusExistingBrowserTabCalls = [];
+  const server = await startAttentionServer({
+    webuiRemoteBase: 'http://127.0.0.1:8788',
+    initialPreferences: { allow_inline_action_responses: true, allow_direct_send: true },
+    loginWebui: async () => ({ ok: true, cookieHeader: 'hermes_session=token.sig' }),
+    webuiFetch: async () => ({ status: 200, ok: true, data: { sessions: [] } }),
+    focusExistingBrowserTab: (url, origin) => {
+      focusExistingBrowserTabCalls.push({ url, origin });
+      return { focused: true, reused: true };
+    },
+    openExternal: (url) => { openExternalCalls.push(url); return true; }
+  });
+  try {
+    const address = server.address();
+    const base = `http://${address.address}:${address.port}`;
+    await server.tickServerAttention();
+
+    // Establish an active bridge: poll the navigation queue once so
+    // bridgeRecentlyPolled() is true when open_session fires. (A POST snapshot
+    // is NOT adopted by server mode — the bridge poll is what marks the WebUI
+    // tab as live.)
+    await fetch(`${base}/api/pet/navigation`);
+
+    // Fire open_session (no draft) concurrently. It must await the navigation
+    // ack first, so it stays pending until the bridge acks the queued command.
+    const openPromise = fetch(`${base}/api/pet/open_session`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ session_id: 'srv-bridge-1' })
+    });
+
+    // While the request is pending, the active bridge polls the navigation
+    // queue and acks the command — exactly the real adapter flow, now also
+    // honoured in server mode.
+    const command = await waitForCommand(base, '/api/pet/navigation', (item) => item.session_id === 'srv-bridge-1');
+    assert.equal(command.session_id, 'srv-bridge-1');
+    assert.equal(command.url, 'http://127.0.0.1:8788/session/srv-bridge-1');
+
+    const ack = await fetch(`${base}/api/pet/navigation_ack`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id: command.id })
+    });
+    const ackBody = await ack.json();
+    assert.equal(ack.status, 200);
+    assert.equal(ackBody.ok, true);
+
+    const open = await openPromise;
+    const opened = await open.json();
+
+    // The bridge consumed the navigation: no browser open/focus fallback.
+    assert.equal(open.status, 200);
+    assert.equal(opened.ok, true);
+    assert.equal(opened.consumed, true, 'server mode must report consumed=true when the bridge acks');
+    assert.equal(opened.opened, false, 'server mode must not open a browser tab when the bridge acks');
+    assert.equal(opened.focused, false, 'server mode must not focus a browser tab when the bridge acks');
+    assert.equal(opened.reused, false, 'server mode must not report a reused browser tab when the bridge acks');
+    assert.equal(opened.queued, true, 'server mode bridge-consumed response must set queued=true');
+    assert.equal(opened.server_executed, true, 'server mode must still mark server_executed=true on bridge-consumed path');
+    assert.equal(opened.url, 'http://127.0.0.1:8788/session/srv-bridge-1');
+    assert.equal(openExternalCalls.length, 0, 'openExternal spy must record zero calls when the bridge acks in server mode');
+    assert.equal(focusExistingBrowserTabCalls.length, 0, 'focusExistingBrowserTab must not be called when the bridge acks in server mode');
+  } finally {
+    await closeAttentionServer(server);
+  }
+});
+
+test('server attention mode open_session falls back to opening the browser when no bridge has polled', async () => {
+  const openExternalCalls = [];
+  const focusExistingBrowserTabCalls = [];
+  const server = await startAttentionServer({
+    webuiRemoteBase: 'http://127.0.0.1:8788',
+    initialPreferences: { allow_inline_action_responses: true, allow_direct_send: true },
+    loginWebui: async () => ({ ok: true, cookieHeader: 'hermes_session=token.sig' }),
+    webuiFetch: async () => ({ status: 200, ok: true, data: { sessions: [] } }),
+    focusExistingBrowserTab: (url, origin) => {
+      focusExistingBrowserTabCalls.push({ url, origin });
+      return { focused: false, reused: false };
+    },
+    openExternal: (url) => { openExternalCalls.push(url); return true; }
+  });
+  try {
+    const address = server.address();
+    const base = `http://${address.address}:${address.port}`;
+    await server.tickServerAttention();
+
+    // No GET /api/pet/navigation before open_session: bridgeRecentlyPolled()
+    // is false, so a plain (no-draft) open_session must fall back to opening a
+    // browser tab (existing server-mode behaviour preserved).
+    const open = await fetch(`${base}/api/pet/open_session`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ session_id: 'srv-nobridge-1' })
+    });
+    const opened = await open.json();
+
+    assert.equal(open.status, 200);
+    assert.equal(opened.ok, true);
+    assert.equal(opened.opened, true, 'server mode with no active bridge must still open a browser tab');
+    assert.equal(opened.server_executed, true);
+    assert.equal(opened.consumed, false);
+    assert.equal(opened.url, 'http://127.0.0.1:8788/session/srv-nobridge-1');
+    assert.equal(openExternalCalls.length, 1);
+    assert.deepEqual(openExternalCalls, ['http://127.0.0.1:8788/session/srv-nobridge-1']);
+  } finally {
+    await closeAttentionServer(server);
+  }
+});
