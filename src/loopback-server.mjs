@@ -2922,12 +2922,12 @@ export function createServer(options = {}) {
         const command = queuePetSessionNavigation(body);
         const origin = latestWebuiOrigin(latestSnapshot)
           || (serverAttentionActive && serverAttentionConfig.baseUrl ? serverAttentionConfig.baseUrl.origin : null);
-        const focused = await focusOrOpenBrowserUrl(command.url, origin, options);
         if (serverAttentionActive) {
           // Server mode: the adapter page is absent, so skip the bridge ack
-          // wait entirely. The browser was opened/focused to the session URL;
+          // wait entirely. The browser is opened/focused to the session URL;
           // any draft/autosend payload is silently dropped (P2-1 accepted:
           // the user lands on the session page and can send from there).
+          const focused = await focusOrOpenBrowserUrl(command.url, origin, options);
           sendJson(res, 200, {
             ok: true,
             consumed: false,
@@ -2941,31 +2941,59 @@ export function createServer(options = {}) {
           }, headers);
           return;
         }
+        // Adapter mode: when an active WebUI bridge recently polled the
+        // navigation queue, prefer waiting for the bridge to ack the command
+        // BEFORE falling back to opening/focusing a browser tab. This keeps
+        // the user's existing WebUI tab as the primary navigation target and
+        // only opens a new tab when the bridge cannot consume the command.
         const needsBridgeAck = Boolean(command.draft || command.autosend);
-        const consumed = needsBridgeAck
-          ? await waitForNavigationAck(command.id, PET_ACTION_WAIT_MS)
-          : (
-              focused.focused || focused.reused || focused.opened
-                ? false
-                : (bridgeRecentlyPolled() ? await waitForNavigationAck(command.id) : false)
-            );
+        let consumed = false;
+        if (needsBridgeAck) {
+          // Draft/autosend payloads must route through the bridge with the
+          // long timeout; a missed ack here is a hard 504 (the draft payload
+          // must not be silently dropped).
+          consumed = await waitForNavigationAck(command.id, PET_ACTION_WAIT_MS);
+        } else if (bridgeRecentlyPolled()) {
+          // Plain navigation with an active bridge: wait briefly for the ack
+          // (default 1600ms). The request stays pending here while the
+          // adapter polls /api/pet/navigation and acks the queued command.
+          consumed = await waitForNavigationAck(command.id);
+        }
         if (needsBridgeAck && !consumed) {
           sendJson(res, 504, {
             ok: false,
             error: 'webui_navigation_timeout',
             consumed: false,
-            opened: focused.opened,
+            opened: false,
             queued: true,
-            focused: focused.focused,
-            reused: focused.reused,
+            focused: false,
+            reused: false,
             command,
             url: command.url
           }, headers);
           return;
         }
+        // Bridge consumed the command: no browser open/focus fallback.
+        if (consumed) {
+          sendJson(res, 200, {
+            ok: true,
+            consumed: true,
+            opened: false,
+            focused: false,
+            reused: false,
+            queued: true,
+            command,
+            url: command.url
+          }, headers);
+          return;
+        }
+        // No fresh bridge or ack not consumed: fall back to opening/focusing
+        // a browser tab. A plain (no-draft) timeout falls through here rather
+        // than returning a 504.
+        const focused = await focusOrOpenBrowserUrl(command.url, origin, options);
         sendJson(res, 200, {
           ok: true,
-          consumed,
+          consumed: false,
           opened: focused.opened,
           queued: true,
           focused: focused.focused,

@@ -517,8 +517,12 @@ test('pet open_session waits for bridge ack when sending a quick reply draft', a
     const opened = await open.json();
     assert.equal(open.status, 200);
     assert.equal(opened.consumed, true);
-    assert.equal(opened.focused, true);
-    assert.equal(opened.reused, true);
+    // The bridge acked the navigation: no browser open/focus fallback ran,
+    // so focused/reused/opened all stay false under the active-bridge-first
+    // contract.
+    assert.equal(opened.focused, false);
+    assert.equal(opened.reused, false);
+    assert.equal(opened.opened, false);
   } finally {
     await new Promise((resolve, reject) => {
       server.close((error) => (error ? reject(error) : resolve()));
@@ -571,6 +575,129 @@ test('pet open_session downgrades autosend when direct send is disabled', async 
     assert.equal(open.status, 200);
     assert.equal(opened.command.autosend, false);
     assert.equal(opened.command.autosend_blocked, true);
+  } finally {
+    await new Promise((resolve, reject) => {
+      server.close((error) => (error ? reject(error) : resolve()));
+    });
+  }
+});
+
+test('pet open_session reuses the active WebUI bridge tab before browser fallback', async () => {
+  const openExternalCalls = [];
+  const focusExistingBrowserTabCalls = [];
+  const server = createServer({
+    attentionMode: 'adapter',
+    preferencePath: null,
+    focusExistingBrowserTab: (url, origin) => {
+      focusExistingBrowserTabCalls.push({ url, origin });
+      return { focused: true, reused: true };
+    },
+    openExternal: (url) => {
+      openExternalCalls.push(url);
+      return true;
+    }
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  const base = `http://${address.address}:${address.port}`;
+  try {
+    await fetch(`${base}/api/webui/snapshot`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        source: 'hermes-webui',
+        page: { href: 'http://127.0.0.1:8787/session/current' }
+      })
+    });
+
+    // Establish an active bridge: poll navigation once so
+    // bridgeRecentlyPolled() is true when open_session fires.
+    await fetch(`${base}/api/pet/navigation`);
+
+    // Fire open_session (no draft). It must await the navigation ack first,
+    // so it stays pending until the bridge acks the queued command.
+    const openPromise = fetch(`${base}/api/pet/open_session`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ session_id: 'abc123' })
+    });
+
+    // While the request is pending, the active bridge polls the navigation
+    // queue and acks the command — exactly the real adapter flow.
+    const command = await waitForCommand(base, '/api/pet/navigation', (item) => item.session_id === 'abc123');
+    assert.equal(command.session_id, 'abc123');
+    assert.equal(command.url, 'http://127.0.0.1:8787/session/abc123');
+
+    const ack = await fetch(`${base}/api/pet/navigation_ack`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id: command.id })
+    });
+    const ackBody = await ack.json();
+    assert.equal(ack.status, 200);
+    assert.equal(ackBody.ok, true);
+
+    const open = await openPromise;
+    const opened = await open.json();
+
+    // The bridge consumed the navigation: no browser open/focus fallback.
+    assert.equal(open.status, 200);
+    assert.equal(opened.ok, true);
+    assert.equal(opened.consumed, true);
+    assert.equal(opened.opened, false, 'must not open a browser tab when the bridge acks');
+    assert.equal(opened.focused, false, 'must not focus a browser tab when the bridge acks');
+    assert.equal(opened.reused, false, 'must not report a reused browser tab when the bridge acks');
+    assert.equal(opened.queued, true);
+    assert.equal(opened.url, 'http://127.0.0.1:8787/session/abc123');
+    assert.equal(openExternalCalls.length, 0, 'openExternal spy must record zero calls when the bridge acks');
+    assert.equal(focusExistingBrowserTabCalls.length, 0, 'focusExistingBrowserTab must not be called when the bridge acks');
+  } finally {
+    await new Promise((resolve, reject) => {
+      server.close((error) => (error ? reject(error) : resolve()));
+    });
+  }
+});
+
+test('pet open_session falls back to openExternal when no fresh bridge has polled', async () => {
+  const openExternalCalls = [];
+  const focusExistingBrowserTabCalls = [];
+  const server = createServer({
+    attentionMode: 'adapter',
+    preferencePath: null,
+    focusExistingBrowserTab: false,
+    openExternal: (url) => {
+      openExternalCalls.push(url);
+      return true;
+    }
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  const base = `http://${address.address}:${address.port}`;
+  try {
+    await fetch(`${base}/api/webui/snapshot`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        source: 'hermes-webui',
+        page: { href: 'http://127.0.0.1:8787/session/current' }
+      })
+    });
+
+    // No GET /api/pet/navigation before open_session: bridgeRecentlyPolled()
+    // is false, so a plain (no-draft) open_session must fall back to
+    // openExternal instead of waiting on a bridge ack.
+    const open = await fetch(`${base}/api/pet/open_session`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ session_id: 'abc123' })
+    });
+    const opened = await open.json();
+
+    assert.equal(open.status, 200);
+    assert.equal(opened.opened, true, 'must fall back to opening a browser tab when no fresh bridge exists');
+    assert.equal(opened.url, 'http://127.0.0.1:8787/session/abc123');
+    assert.deepEqual(openExternalCalls, ['http://127.0.0.1:8787/session/abc123']);
+    assert.equal(focusExistingBrowserTabCalls.length, 0);
   } finally {
     await new Promise((resolve, reject) => {
       server.close((error) => (error ? reject(error) : resolve()));
