@@ -1461,12 +1461,7 @@ fn main() {
                         return;
                     };
                     let _ = window.popup_menu(&menu);
-                    // Restore AOT immediately after the menu closes — popup_menu
-                    // is blocking and returns only when the menu is dismissed.
-                    // The previous 12s delay left windows without AOT for the
-                    // entire interval, causing them to be obscured by any window
-                    // that gained focus during that window.
-                    restore_pet_window_layers(&menu_handle);
+                    restore_pet_window_layers_later(menu_handle.clone(), Duration::from_secs(12));
                 });
             });
             Ok(())
