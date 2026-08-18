@@ -1012,9 +1012,16 @@ fn build_tray(app: &tauri::AppHandle, user_hidden: Arc<AtomicBool>, always_on_to
                 let handle = app.clone();
                 let window_handle = handle.clone();
                 let hidden_state = user_hidden.clone();
+                let fs_hide = fullscreen_hide.clone();
+                let fs_vis = fullscreen_visibility.clone();
                 let _ = handle.run_on_main_thread(move || {
+                    // Suppress show if fullscreen auto-hide is active.
+                    let fs_active = fs_hide.load(Ordering::SeqCst)
+                        && fs_vis.lock()
+                            .map(|state| state.active)
+                            .unwrap_or(false);
                     let show = if hidden_state.load(Ordering::SeqCst) {
-                        true
+                        !fs_active // would show, but not during fullscreen
                     } else {
                         window_handle
                             .get_webview_window("pet")
