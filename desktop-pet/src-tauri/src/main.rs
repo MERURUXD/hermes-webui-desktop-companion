@@ -641,13 +641,11 @@ fn restore_pet_window_layers(app: &tauri::AppHandle) {
     if let Some(pet_window) = app.get_webview_window("pet") {
         let _ = pet_window.set_ignore_cursor_events(false);
         set_native_ignore_cursor_events(&pet_window, false);
-        if aot { let _ = pet_window.set_always_on_top(false); }
         let _ = pet_window.set_always_on_top(aot);
         set_pet_window_level(&pet_window);
         install_first_click_handler(&pet_window);
     }
     if let Some(bubble_window) = app.get_webview_window("pet_bubbles") {
-        if aot { let _ = bubble_window.set_always_on_top(false); }
         let _ = bubble_window.set_always_on_top(aot);
         set_bubble_window_level(&bubble_window);
         install_first_click_handler(&bubble_window);
@@ -875,13 +873,13 @@ fn build_tray(app: &tauri::AppHandle, user_hidden: Arc<AtomicBool>, always_on_to
                     }
                     // After surfacing the windows, re-assert the always-on-top
                     // + native window level via the unified restore helper so
-                    // the platform never drops the AOT flag right after show()
-                    // (E0505/E0507 settle behaviour). A short delayed re-assert
-                    // (~120ms) catches any wry transient that re-asserts after
-                    // the show() completes.
+                    // the platform never drops the AOT flag right after show().
+                    // We do NOT schedule a delayed re-assert: an extra
+                    // false→true z-order reflow caused flicker / CPU / drag lag
+                    // in the field when AOT was on and the pet overlapped the
+                    // taskbar. The single flag-aware restore is enough.
                     if show {
                         restore_pet_window_layers(&window_handle);
-                        restore_pet_window_layers_later(window_handle.clone(), Duration::from_millis(120));
                     }
                 });
             }
@@ -1063,11 +1061,10 @@ fn main() {
                             let _ = window.show();
                             // Pet was actually shown: re-assert the AOT + native
                             // window level via the unified restore helper so the
-                            // platform keeps the on-top flag after show(), plus
-                            // a short delayed re-assert (~120ms) for any wry
-                            // transient that re-asserts after show() completes.
+                            // platform keeps the on-top flag after show(). No
+                            // delayed re-assert: an extra false→true z-order
+                            // reflow caused flicker / CPU / drag lag in the field.
                             restore_pet_window_layers(&window_handle);
-                            restore_pet_window_layers_later(window_handle.clone(), Duration::from_millis(120));
                         }
                     }
                 });
