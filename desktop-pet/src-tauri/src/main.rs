@@ -21,7 +21,10 @@ use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromWindow, MONITORI
 #[cfg(target_os = "windows")]
 use windows::Win32::System::Threading::CreateMutexW;
 #[cfg(target_os = "windows")]
-use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowRect, GetWindowThreadProcessId, IsZoomed};
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetForegroundWindow, GetWindowLongW, GetWindowRect, GetWindowThreadProcessId, IsZoomed,
+    GWL_STYLE, WS_CAPTION, WS_THICKFRAME,
+};
 
 const CLOSE_PET_MENU_ID: &str = "close_pet";
 const MANAGE_PETS_MENU_ID: &str = "manage_pets";
@@ -878,7 +881,7 @@ fn window_is_ours(hwnd: HWND) -> bool {
 #[cfg(target_os = "windows")]
 fn is_fullscreen_foreground() -> bool {
     let hwnd = unsafe { GetForegroundWindow() };
-    if hwnd.is_invalid() || window_is_ours(hwnd) || unsafe { IsZoomed(hwnd).as_bool() } {
+    if hwnd.is_invalid() || window_is_ours(hwnd) {
         return false;
     }
     let mut window_rect = RECT::default();
@@ -887,10 +890,25 @@ fn is_fullscreen_foreground() -> bool {
     if monitor.is_invalid() { return false; }
     let mut info = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
     if !unsafe { GetMonitorInfoW(monitor, &mut info) }.as_bool() { return false; }
-    window_rect.left <= info.rcMonitor.left
+    // Window must cover the entire monitor (rcMonitor, not rcWork).
+    let covers_monitor = window_rect.left <= info.rcMonitor.left
         && window_rect.top <= info.rcMonitor.top
         && window_rect.right >= info.rcMonitor.right
-        && window_rect.bottom >= info.rcMonitor.bottom
+        && window_rect.bottom >= info.rcMonitor.bottom;
+    if !covers_monitor {
+        return false;
+    }
+    // Distinguish borderless fullscreen from ordinary maximized windows.
+    // Classic fullscreen (F11, PowerPoint, exclusive): IsZoomed is false.
+    // Borderless fullscreen games: IsZoomed is true, but window has no
+    // caption or sizing border (WS_POPUP without WS_CAPTION/WS_THICKFRAME).
+    // Ordinary maximized (incl. auto-hide taskbar): IsZoomed is true and
+    // the window retains WS_CAPTION and/or WS_THICKFRAME.
+    if !unsafe { IsZoomed(hwnd).as_bool() } {
+        return true; // classic fullscreen, not maximized
+    }
+    let style = unsafe { GetWindowLongW(hwnd, GWL_STYLE) } as u32;
+    style & (WS_CAPTION.0 | WS_THICKFRAME.0) == 0
 }
 
 #[derive(Clone, Copy, Default)]
