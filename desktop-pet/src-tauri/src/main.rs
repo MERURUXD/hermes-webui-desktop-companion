@@ -1145,7 +1145,7 @@ fn main() {
             app.manage(PetScaleFlag(pet_scale_for_setup.clone()));
             build_tray(app.handle(), user_hidden_for_tray.clone(), always_on_top_for_tray, fullscreen_hide_for_tray.clone(), fullscreen_visibility_for_tray)?;
             #[cfg(target_os = "windows")]
-            start_fullscreen_monitor(app.handle().clone(), fullscreen_hide_for_setup.clone(), fullscreen_visibility_for_setup);
+            start_fullscreen_monitor(app.handle().clone(), fullscreen_hide_for_setup.clone(), fullscreen_visibility_for_setup.clone());
 
             // Initialize pet/bubbles BEFORE navigation and re-assert
             // skip_taskbar on each window so the config-driven creation
