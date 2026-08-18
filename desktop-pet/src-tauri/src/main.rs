@@ -951,6 +951,7 @@ fn start_fullscreen_monitor(
                         }
                         for label in ["pet", "pet_bubbles"] {
                             if let Some(window) = handle.get_webview_window(label) {
+                                let _ = window.set_always_on_top(false);
                                 let _ = window.hide();
                             }
                         }
@@ -973,9 +974,12 @@ fn start_fullscreen_monitor(
 fn restore_window_visibility(app: &tauri::AppHandle, pet_visible: bool, bubbles_visible: bool) {
     let handle = app.clone();
     let _ = handle.clone().run_on_main_thread(move || {
+        // Read current AOT preference (user may have toggled it during fullscreen)
+        let aot = handle.state::<AlwaysOnTopFlag>().0.load(Ordering::SeqCst);
         for (label, should_show) in [("pet", pet_visible), ("pet_bubbles", bubbles_visible)] {
             if should_show {
                 if let Some(window) = handle.get_webview_window(label) {
+                    let _ = window.set_always_on_top(aot);
                     if !window.is_visible().unwrap_or(false) { let _ = window.show(); }
                 }
             }
@@ -1241,7 +1245,18 @@ fn main() {
                     .and_then(|payload| payload.focus)
                     .unwrap_or(false);
                 let hidden_state = raise_user_hidden.clone();
+                let fs_hide = raise_fullscreen_hide.clone();
+                let fs_vis = raise_fullscreen_visibility.clone();
                 let _ = runner_handle.run_on_main_thread(move || {
+                    // Double-check fullscreen active inside main thread to close
+                    // the race where the monitor thread's closure hasn't run yet.
+                    if fs_hide.load(Ordering::SeqCst)
+                        && fs_vis.lock()
+                            .map(|state| state.active)
+                            .unwrap_or(false)
+                    {
+                        return;
+                    }
                     apply_bubble_visibility(&control_handle, &visible_state, visible, focus);
                     if let Some(window) = window_handle.get_webview_window("pet") {
                         let _ = window.set_ignore_cursor_events(false);
@@ -1286,7 +1301,17 @@ fn main() {
                     .lock()
                     .map(|state| *state != visible)
                     .unwrap_or(true);
+                let fs_hide = attention_fullscreen_hide.clone();
+                let fs_vis = attention_fullscreen_visibility.clone();
                 let _ = handle.run_on_main_thread(move || {
+                    // Double-check fullscreen active inside main thread.
+                    if fs_hide.load(Ordering::SeqCst)
+                        && fs_vis.lock()
+                            .map(|state| state.active)
+                            .unwrap_or(false)
+                    {
+                        return;
+                    }
                     if should_apply {
                         apply_bubble_visibility(&handle_for_window, &visible_state, visible, false);
                     }
