@@ -17,3 +17,7 @@ desktop-pet/src-tauri/gen/
 
 # Local-only project memory (never pushed)
 .hermes.md
+.hermes/
+
+# winpc 本机构建环境配置（本地 Clash 代理 + crates 镜像源），不进仓库
+desktop-pet/src-tauri/.cargo/
