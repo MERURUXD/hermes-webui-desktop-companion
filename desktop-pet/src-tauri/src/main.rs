@@ -22,8 +22,9 @@ use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromWindow, MONITORI
 use windows::Win32::System::Threading::CreateMutexW;
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetForegroundWindow, GetWindowLongW, GetWindowRect, GetWindowThreadProcessId, IsZoomed,
-    GWL_STYLE, WS_CAPTION, WS_THICKFRAME,
+    GetForegroundWindow, GetWindowLongW, GetWindowRect, GetWindowThreadProcessId, IsZoomed, GWL_STYLE,
+    HWND_NOTOPMOST, HWND_TOPMOST, SetWindowPos, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, WS_CAPTION,
+    WS_THICKFRAME,
 };
 
 const CLOSE_PET_MENU_ID: &str = "close_pet";
@@ -536,13 +537,6 @@ fn emit_pet_scale(app: &tauri::AppHandle, scale: u16) {
     });
 }
 
-fn lower_pet_windows_for_menu(app: &tauri::AppHandle) {
-    for label in ["pet", "pet_bubbles"] {
-        if let Some(window) = app.get_webview_window(label) {
-            let _ = window.set_always_on_top(false);
-        }
-    }
-}
 
 #[cfg(target_os = "macos")]
 fn set_native_window_level(window: &WebviewWindow, level: objc2_app_kit::NSWindowLevel) {
@@ -677,17 +671,34 @@ fn attach_bubble_child_window(pet_window: &WebviewWindow, bubble_window: &Webvie
 #[cfg(not(target_os = "macos"))]
 fn attach_bubble_child_window(_pet_window: &WebviewWindow, _bubble_window: &WebviewWindow) {}
 
+/// Force the always-on-top state via a synchronous Win32 SetWindowPos, bypassing
+/// tao's diff-based set_always_on_top (which no-ops when its internal flag
+/// already matches, and uses SWP_ASYNCWINDOWPOS).
+#[cfg(target_os = "windows")]
+fn set_native_always_on_top(window: &WebviewWindow, topmost: bool) {
+    if let Ok(hwnd) = window.hwnd() {
+        let flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
+        let insert_after = if topmost { Some(HWND_TOPMOST) } else { Some(HWND_NOTOPMOST) };
+        let _ = unsafe { SetWindowPos(hwnd, insert_after, 0, 0, 0, 0, flags) };
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn set_native_always_on_top(_window: &WebviewWindow, _topmost: bool) {}
+
 fn restore_pet_window_layers(app: &tauri::AppHandle) {
     let aot = app.state::<AlwaysOnTopFlag>().0.load(Ordering::SeqCst);
     if let Some(pet_window) = app.get_webview_window("pet") {
         let _ = pet_window.set_ignore_cursor_events(false);
         set_native_ignore_cursor_events(&pet_window, false);
         let _ = pet_window.set_always_on_top(aot);
+        set_native_always_on_top(&pet_window, aot);
         set_pet_window_level(&pet_window);
         install_first_click_handler(&pet_window);
     }
     if let Some(bubble_window) = app.get_webview_window("pet_bubbles") {
         let _ = bubble_window.set_always_on_top(aot);
+        set_native_always_on_top(&bubble_window, aot);
         set_bubble_window_level(&bubble_window);
         install_first_click_handler(&bubble_window);
     }
@@ -699,6 +710,20 @@ fn restore_pet_window_layers_later(app: tauri::AppHandle, delay: Duration) {
         let handle_for_window = app.clone();
         let _ = app.run_on_main_thread(move || restore_pet_window_layers(&handle_for_window));
     });
+}
+
+/// Schedule delayed native AOT re-asserts so the pet/bubble TOPMOST flag is
+/// re-established after any deferred Z-order reflow (menu dismissal, bubble
+/// show/hide) settles. The synchronous Win32 SetWindowPos re-assert in
+/// restore_pet_window_layers runs before that reflow lands, so tao/wry can
+/// still drop the pet window's TOPMOST as a side effect of the bubble window's
+/// show()/Z-order changes. Unlike the old false→true refresh, this only ever
+/// calls set_always_on_top + SetWindowPos(HWND_TOPMOST) (no NOTOPMOST drop),
+/// so it re-asserts without the flicker / drag-lag a false→true reflow caused.
+fn reassert_aot_after_churn(app: tauri::AppHandle) {
+    for delay in [Duration::from_millis(120), Duration::from_millis(500)] {
+        restore_pet_window_layers_later(app.clone(), delay);
+    }
 }
 
 fn restore_pet_window_layers_during_startup(app: tauri::AppHandle) {
@@ -833,9 +858,16 @@ fn apply_bubble_visibility(
     set_native_ignore_cursor_events(&bubble_window, !visible);
     if visible {
         let _ = bubble_window.set_always_on_top(aot);
+        set_native_always_on_top(&bubble_window, aot);
         set_bubble_window_level(&bubble_window);
         install_first_click_handler(&bubble_window);
         let _ = bubble_window.show();
+        // After show(), re-assert both bubble and pet AOT via Win32: tao/wry
+        // can drop TOPMOST on the pet window as a side-effect of bubble.show().
+        set_native_always_on_top(&bubble_window, aot);
+        if let Some(pet_window) = app.get_webview_window("pet") {
+            set_native_always_on_top(&pet_window, aot);
+        }
         if focus {
             let _ = bubble_window.set_focus();
         }
@@ -1264,6 +1296,22 @@ fn main() {
                     {
                         return;
                     }
+                    // Dedup: skip when the bubble visibility state is unchanged
+                    // and this isn't a focus request. When the bubble stays hidden
+                    // (no attention), bubbles.js re-emits raise(false) at
+                    // millisecond cadence; running pet.show()+restore_pet_window_layers
+                    // unconditionally on each one re-enters bubbles.js via the
+                    // SetWindowPos / hide side effects and forms a feedback loop
+                    // that churns Z-order until the pet window's TOPMOST is
+                    // dropped. Collapse repeated raises to a single real
+                    // transition (or a focus request).
+                    let state_changed = visible_state
+                        .lock()
+                        .map(|state| *state != visible)
+                        .unwrap_or(true);
+                    if !state_changed && !focus {
+                        return;
+                    }
                     apply_bubble_visibility(&control_handle, &visible_state, visible, focus);
                     if let Some(window) = window_handle.get_webview_window("pet") {
                         let _ = window.set_ignore_cursor_events(false);
@@ -1304,10 +1352,6 @@ fn main() {
                 }
                 let handle_for_window = handle.clone();
                 let visible_state = attention_visible_state.clone();
-                let should_apply = visible_state
-                    .lock()
-                    .map(|state| *state != visible)
-                    .unwrap_or(true);
                 let fs_hide = attention_fullscreen_hide.clone();
                 let fs_vis = attention_fullscreen_visibility.clone();
                 let _ = handle.run_on_main_thread(move || {
@@ -1319,8 +1363,32 @@ fn main() {
                     {
                         return;
                     }
+                    // Re-read the visibility state ON the main thread. Attention
+                    // events arrive in a flood (dozens/sec) and are all
+                    // dispatched before any queued main-thread closure runs, so
+                    // computing `should_apply` outside this closure makes the
+                    // dedup race and re-applies (re-show / re-assert) the bubble
+                    // dozens of times. Reading it here collapses the flood to a
+                    // single real transition.
+                    let should_apply = visible_state
+                        .lock()
+                        .map(|state| *state != visible)
+                        .unwrap_or(true);
                     if should_apply {
                         apply_bubble_visibility(&handle_for_window, &visible_state, visible, false);
+                        // Re-assert pet AOT after bubble show/hide via Win32
+                        // SetWindowPos: tao/wry silently drops TOPMOST when the
+                        // bubble window's Z-order changes. The synchronous
+                        // re-assert lands before the deferred Z-order reflow, so
+                        // also schedule delayed re-asserts to re-establish TOPMOST
+                        // after the reflow settles.
+                        let aot = handle_for_window.state::<AlwaysOnTopFlag>().0.load(Ordering::SeqCst);
+                        if let Some(pet_window) = handle_for_window.get_webview_window("pet") {
+                            set_native_always_on_top(&pet_window, aot);
+                        }
+                        if aot {
+                            reassert_aot_after_churn(handle_for_window.clone());
+                        }
                     }
                 });
             });
@@ -1340,7 +1408,14 @@ fn main() {
                     let Some(window) = menu_handle.get_webview_window("pet") else {
                         return;
                     };
-                    lower_pet_windows_for_menu(&menu_handle);
+                    // Do NOT lower the pet windows before popup_menu. On Windows,
+                    // TrackPopupMenu renders its menu as a system topmost window
+                    // that always appears above the pet anyway, so lowering is
+                    // unnecessary there — and lowering the owner (pet) window is
+                    // exactly what makes TrackPopupMenu lock the pet's
+                    // WS_EX_TOPMOST bit for a few seconds after the menu
+                    // dismisses (SetWindowPos/SetWindowLongPtr both return Ok but
+                    // the bit stays cleared), which is the AOT-loss bug.
                     let mut skin_builder = SubmenuBuilder::new(&menu_handle, "Switch skin");
                     let active_skin_id = payload
                         .active_skin_id
@@ -1461,7 +1536,13 @@ fn main() {
                         return;
                     };
                     let _ = window.popup_menu(&menu);
-                    restore_pet_window_layers_later(menu_handle.clone(), Duration::from_secs(12));
+                    // popup_menu is blocking and returns only when the menu is
+                    // dismissed. Re-assert the AOT layer afterwards as a
+                    // belt-and-braces measure — the pet is no longer lowered before
+                    // the menu (see the note above), so this just confirms the
+                    // topmost state rather than recovering from a drop.
+                    restore_pet_window_layers(&menu_handle);
+                    reassert_aot_after_churn(menu_handle.clone());
                 });
             });
             Ok(())
